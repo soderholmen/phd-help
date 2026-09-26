@@ -10,4 +10,9 @@ Glossary for phd-helper: a personal tool for co-writing research papers with a l
 - **Dictation** — voice input of prose the agent should write, cleaned before it reaches the agent (disfluencies removed, spoken LaTeX normalized to markup).
 - **Conversation mode** — hands-free voice interaction with no push-to-talk: VAD-driven capture, and the agent replies by voice (TTS) as well as on screen.
 - **Academic-first search** — web search oriented at scholarly sources (arXiv, Semantic Scholar) with a find-paper → BibTeX → `.bib` loop; general web as secondary.
+- **Paper skeleton** — the whole-paper view the agent sees alongside the selected section: title, abstract, all section headings, and a one-line gist per section. Gists regenerate whenever a section file changes.
+- **Paper memory** — the small persistent list that survives across sections: decisions made, claims to keep consistent, terminology, open TODOs. Distilled at session end plus on voice command; user-editable.
+- **Pinned source** — a reference PDF attached to a section; always contributes its abstract and headings to that section's context, and is chunk-searched for detail.
+- **Anchored patch** — the default write into a section: an exact find/replace whose untouched prose stays byte-identical. Full-section rewrite happens only on explicit user command.
+- **Cleanup pass** — the dedicated fast transformation of raw dictation transcript into clean instruction/prose before the agent's turn; the cleaned text is what enters conversation history.
 - **Local model** — the LLM served by the user's own vLLM instance (Qwen3-class, OpenAI-compatible API). No cloud model APIs in the writing path.
