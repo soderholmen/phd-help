@@ -1,0 +1,216 @@
+<!doctype html>
+<!-- PROTOTYPE — phd-helper voice loop latency probe. Throwaway; see README.md. -->
+<meta charset="utf-8">
+<title>VOICE LOOP PROTOTYPE — phd-helper</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: ui-monospace, Consolas, monospace; background: #14171a; color: #d8dee4; margin: 0; padding: 24px; }
+  h1 { font-size: 15px; color: #e3b341; letter-spacing: 1px; }
+  .sub { color: #8b949e; font-size: 12px; margin-bottom: 18px; }
+  #start { font: inherit; font-size: 16px; padding: 12px 28px; background: #238636; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
+  #start:disabled { background: #30363d; color: #8b949e; }
+  #state { display: inline-block; margin-left: 16px; padding: 6px 14px; border-radius: 999px; font-size: 13px; background: #30363d; }
+  #state.heard { background: #1f6feb; } #state.busy { background: #9e6a03; } #state.speaking { background: #238636; }
+  .panel { margin-top: 20px; padding: 14px; background: #1c2128; border: 1px solid #30363d; border-radius: 8px; }
+  .panel h2 { margin: 0 0 8px; font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; }
+  #heard { min-height: 20px; font-size: 15px; }
+  #heard .resp { color: #7ee787; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { padding: 5px 10px; text-align: right; border-bottom: 1px solid #30363d; white-space: nowrap; }
+  th { color: #8b949e; font-weight: normal; }
+  td:first-child, th:first-child { text-align: left; }
+  tr.avg td { color: #e3b341; border-top: 2px solid #30363d; }
+  .big { color: #7ee787; }
+  .hint { color: #8b949e; font-size: 12px; margin-top: 10px; }
+</style>
+<h1>⚠ VOICE LOOP PROTOTYPE — phd-helper</h1>
+<div class="sub">throwaway latency probe: mic → VAD → parakeet STT → echo stub → Kokoro TTS. Not the app.</div>
+
+<button id="start">Start mic</button>
+<span id="state">idle</span>
+<label style="margin-left:20px;font-size:13px;color:#8b949e">endpoint hangover
+  <input type="range" id="hang" min="0.3" max="1.2" step="0.05" value="0.6">
+  <span id="hangv" style="color:#d8dee4">0.60 s</span></label>
+<div id="err" style="display:none;margin-top:14px;padding:10px 14px;background:#490202;border:1px solid #da3633;border-radius:6px;color:#f85149;font-size:13px"></div>
+
+<div class="panel">
+  <h2>Last turn</h2>
+  <div id="heard">—</div>
+</div>
+
+<div class="panel">
+  <h2>Per-stage latency (ms)</h2>
+  <table id="turns">
+    <thead><tr>
+      <th>turn</th><th>VAD endpoint</th><th>STT</th><th>LLM stub</th>
+      <th>TTS first audio</th><th>downlink→play</th><th class="big">dead air*</th><th>heard</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <div class="hint">* dead air = perceived silence from when you stopped talking to when you heard the reply
+  (VAD hangover + everything after). LLM stub is fake — a real turn adds its time-to-first-token here.</div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const stateEl = $('state');
+let ws, micCtx, playCtx, turnN = 0;
+let tEpRecv = 0, tTtsRecv = 0, tPlay = 0, nextPlayAt = 0;
+let stateNow = 'idle';
+// mic gate: closed while the agent thinks/speaks, and stays closed until the
+// playback queue has actually drained (else the agent hears its own voice).
+const gate = () => stateNow !== 'busy' && (!playCtx || playCtx.currentTime >= nextPlayAt);
+const rows = [];
+
+// ---- mic: capture, downsample to 16k, stream 512-sample frames ----
+const workletSrc = `
+class Down16 extends AudioWorkletProcessor {
+  constructor(){ super(); this.buf = []; this.out = new Int16Array(512); this.outN = 0; }
+  process(inputs){
+    const ch = inputs[0][0]; if(!ch) return true;
+    for(let i=0;i<ch.length;i++) this.buf.push(ch[i]);
+    const ratio = sampleRate / 16000;
+    const need = Math.ceil(512*ratio)+1;
+    while(this.buf.length >= need){
+      for(let k=0;k<512;k++){
+        const pos = k*ratio, i0 = Math.floor(pos), f = pos-i0;
+        const s = this.buf[i0]*(1-f) + this.buf[i0+1]*f;
+        this.out[this.outN++] = Math.max(-1, Math.min(1, s)) * 32767;
+        if(this.outN === 512){ this.port.postMessage(this.out.slice()); this.outN = 0; }
+      }
+      this.buf.splice(0, Math.floor(512*ratio));
+    }
+    return true;
+  }
+}
+registerProcessor('down16', Down16);`;
+
+let micSrc = null, lastRms = 0, silentSince = 0;
+
+function watchTrack(stream) {
+  const track = stream.getAudioTracks()[0];
+  track.onmute = track.onended = () => {
+    fail('mic feed lost (device change/sleep) — recovering…');
+    recoverMic();
+  };
+}
+
+async function recoverMic() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+    });
+    micSrc.disconnect();
+    micSrc = micCtx.createMediaStreamSource(stream);
+    micSrc.connect(window.__node);
+    watchTrack(stream);
+    $('err').style.display = 'none';
+  } catch (e) { fail('mic recovery failed: ' + e.message); }
+}
+
+async function start() {
+  $('start').disabled = true;
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+  });
+  watchTrack(stream);
+  micCtx = new AudioContext();
+  const url = URL.createObjectURL(new Blob([workletSrc], { type: 'application/javascript' }));
+  await micCtx.audioWorklet.addModule(url);
+  const node = new AudioWorkletNode(micCtx, 'down16');
+  window.__node = node;
+  micSrc = micCtx.createMediaStreamSource(stream);
+  micSrc.connect(node);
+  let sent = 0;
+  node.port.onmessage = e => {
+    const f = e.data;
+    let s = 0; for (let i = 0; i < f.length; i += 8) s += f[i] * f[i];  // cheap RMS
+    lastRms = Math.sqrt(s / (f.length / 8));
+    if (gate() && ws && ws.readyState === 1) { ws.send(f.buffer); if (++sent % 250 === 0) console.log('sent', sent); }
+  };
+
+  playCtx = new AudioContext({ sampleRate: 24000 });
+  setInterval(() => {  // liveness ping: which leg died?
+    if (lastRms > 100) silentSince = 0;
+    else if (gate() && !silentSince) silentSince = Date.now();
+    else if (gate() && silentSince && Date.now() - silentSince > 6000 && lastRms < 100)
+      fail('no audio from the mic for 6 s — check the input device');
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({
+      type: 'ping', buf: ws.bufferedAmount, gate: gate(), rms: Math.round(lastRms),
+      mic: micCtx.state, play: playCtx.state,
+      playAt: +playCtx.currentTime.toFixed(1), nextAt: +nextPlayAt.toFixed(1),
+    }));
+  }, 2000);
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = e => { try { onMsg(JSON.parse(e.data)); } catch (err) { fail('bad message: ' + err.message); } };
+  ws.onclose = () => { stateEl.textContent = 'disconnected'; $('start').disabled = false; fail('lost the server — check the console window'); };
+  stateEl.textContent = 'listening';
+}
+$('start').onclick = start;
+
+$('hang').oninput = e => {
+  const s = parseFloat(e.target.value);
+  $('hangv').textContent = s.toFixed(2) + ' s';
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'config', hangover_s: s }));
+};
+
+function fail(msg) {
+  const el = $('err');
+  el.style.display = 'block';
+  el.textContent = '⚠ ' + msg;
+}
+window.onerror = (m, src, line) => { fail(`page error: ${m} (line ${line})`); };
+
+// ---- playback queue ----
+function playWav(b64) {
+  const bin = atob(b64);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  playCtx.decodeAudioData(buf.buffer).then(audio => {
+    const src = playCtx.createBufferSource();
+    src.buffer = audio;
+    const t0 = Math.max(playCtx.currentTime + 0.02, nextPlayAt);
+    src.connect(playCtx.destination);
+    src.start(t0);
+    nextPlayAt = t0 + audio.duration;
+    if (tPlay === 0) tPlay = performance.now() + (t0 - playCtx.currentTime) * 1000;
+  });
+}
+
+// ---- messages + dashboard ----
+function onMsg(m) {
+  if (m.type === 'state') {
+    stateNow = m.state;
+    stateEl.textContent = m.state;
+    stateEl.className = m.state === 'busy' ? 'busy' : m.state === 'heard' ? 'heard' : '';
+    if (m.state === 'busy') { tEpRecv = tEpRecv || performance.now(); tTtsRecv = 0; tPlay = 0; nextPlayAt = 0; }
+  } else if (m.type === 'endpoint') {
+    tEpRecv = performance.now();
+  } else if (m.type === 'tts') {
+    if (tTtsRecv === 0) tTtsRecv = performance.now();
+    stateEl.textContent = 'speaking'; stateEl.className = 'speaking';
+    playWav(m.b64);
+  } else if (m.type === 'error') {
+    fail(m.msg);
+  } else if (m.type === 'timing') {
+    turnN++;
+    const downlink = tPlay && tTtsRecv ? tPlay - tTtsRecv : 0;
+    const dead = m.vad_ms + (tPlay && tEpRecv ? tPlay - tEpRecv : 0);
+    rows.push({ vad: m.vad_ms, stt: m.stt_ms, llm: m.llm_ms, tts: m.tts_first_ms, dl: downlink, dead, txt: m.transcript });
+    render(m);
+  }
+}
+
+function avg(k) { return (rows.reduce((s, r) => s + r[k], 0) / rows.length).toFixed(0); }
+
+function render(m) {
+  $('heard').innerHTML =
+    `you: <b>${m.transcript || '(nothing)'}</b><br><span class="resp">agent: ${m.response}</span>`;
+  const tb = $('turns').querySelector('tbody');
+  tb.innerHTML = rows.map((r, i) => `<tr><td>${i + 1}</td><td>${r.vad.toFixed(0)}</td><td>${r.stt.toFixed(0)}</td>
+    <td>${r.llm.toFixed(0)}</td><td>${r.tts.toFixed(0)}</td><td>${r.dl.toFixed(0)}</td>
+    <td class="big">${r.dead.toFixed(0)}</td><td style="text-align:left">${r.txt}</td></tr>`).join('') +
+    `<tr class="avg"><td>avg</td><td>${avg('vad')}</td><td>${avg('stt')}</td><td>${avg('llm')}</td>
+     <td>${avg('tts')}</td><td>${avg('dl')}</td><td class="big">${avg('dead')}</td><td></td></tr>`;
+}
+</script>
