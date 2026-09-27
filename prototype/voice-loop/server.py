@@ -63,6 +63,9 @@ async def index():
 
 
 def run_stt(audio: np.ndarray) -> str:
+    peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
+    if peak > 1e-4:
+        audio = audio * (0.9 / peak)  # quiet mics shouldn't starve the ASR either
     out = ASR({"array": audio, "sampling_rate": SR})
     return (out.get("text") or "").strip()
 

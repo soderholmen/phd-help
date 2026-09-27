@@ -85,7 +85,7 @@ class Down16 extends AudioWorkletProcessor {
 }
 registerProcessor('down16', Down16);`;
 
-let micSrc = null, lastRms = 0, silentSince = 0;
+let micSrc = null, micGain = null, lastRms = 0, silentSince = 0;
 
 function watchTrack(stream) {
   const track = stream.getAudioTracks()[0];
@@ -102,7 +102,7 @@ async function recoverMic() {
     });
     micSrc.disconnect();
     micSrc = micCtx.createMediaStreamSource(stream);
-    micSrc.connect(window.__node);
+    micSrc.connect(micGain);
     watchTrack(stream);
     $('err').style.display = 'none';
   } catch (e) { fail('mic recovery failed: ' + e.message); }
@@ -118,9 +118,21 @@ async function start() {
   const url = URL.createObjectURL(new Blob([workletSrc], { type: 'application/javascript' }));
   await micCtx.audioWorklet.addModule(url);
   const node = new AudioWorkletNode(micCtx, 'down16');
-  window.__node = node;
+  // AGC: auto-raise quiet mics, compressor caps loud peaks — the VAD/STT
+  // chain sees a normalized level regardless of the Windows mic slider.
+  micGain = micCtx.createGain();
+  const comp = micCtx.createDynamicsCompressor();
+  comp.threshold.value = -18; comp.ratio.value = 6;
+  comp.attack.value = 0.005; comp.release.value = 0.2;
   micSrc = micCtx.createMediaStreamSource(stream);
-  micSrc.connect(node);
+  micSrc.connect(micGain); micGain.connect(comp); comp.connect(node);
+  setInterval(() => {  // lastRms is post-gain (measured on worklet output)
+    const g = micGain.gain.value;
+    let t = g;
+    if (lastRms < 1000) t = Math.min(g * 1.2, 12);
+    else if (lastRms > 5000) t = Math.max(g * 0.85, 0.5);
+    if (t !== g) micGain.gain.setTargetAtTime(t, micCtx.currentTime, 0.1);
+  }, 250);
   let sent = 0;
   node.port.onmessage = e => {
     const f = e.data;

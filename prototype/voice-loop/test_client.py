@@ -4,12 +4,13 @@ Synthesizes a test sentence with Kokoro, streams it downsampled to 16 kHz as if
 from the browser worklet, then silence, and prints what comes back.
 Run with server.py already listening:  .venv/python.exe test_client.py
 """
-import asyncio, json, time
+import asyncio, json, os, time
 import numpy as np
 import websockets
 from kokoro import KPipeline
 
 UTTERANCE = "This is a test of the voice loop."
+GAIN = float(os.environ.get("UTTER_GAIN", "1.0"))  # <1 simulates a quiet mic
 SR = 16000
 
 
@@ -19,7 +20,7 @@ def utterance_pcm16():
     # 24 kHz -> 16 kHz linear interp
     x_old = np.linspace(0, len(audio) - 1, len(audio))
     x_new = np.linspace(0, len(audio) - 1, int(len(audio) * SR / 24000))
-    pcm = np.interp(x_new, x_old, audio)
+    pcm = np.interp(x_new, x_old, audio) * GAIN
     return (np.clip(pcm, -1, 1) * 32767).astype(np.int16)
 
 
