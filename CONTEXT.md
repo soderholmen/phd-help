@@ -8,7 +8,11 @@ Glossary for phd-helper: a personal tool for co-writing research papers with a l
 - **Section-scoped discussion** — a conversation anchored to a selected section (or paragraph) of the paper. The agent sees that section and its sources, and writes back only into that section's file. The user's manual edits are never clobbered: the agent re-reads before writing.
 - **Reference corpus** — the persistent library of reference PDFs the user accumulates across their PhD. Auto-indexed from a drop folder; searchable by the agent (hybrid: keyword + semantic).
 - **Dictation** — voice input of prose the agent should write, cleaned before it reaches the agent (disfluencies removed, spoken LaTeX normalized to markup).
-- **Conversation mode** — hands-free voice interaction with no push-to-talk: VAD-driven capture, and the agent replies by voice (TTS) as well as on screen.
+- **Conversation mode** — hands-free voice interaction, armed only by an explicit user toggle (never push-to-talk, never auto-armed): once on, VAD-driven capture, and the agent replies by voice (TTS) as well as on screen.
+- **Barge-in** — user speech that interrupts the agent while it speaks; it stops the agent's voice output immediately.
+- **Voice endpoint** — the device that currently holds conversation mode: the only client allowed to capture and play audio. All other clients are view-only; arming the toggle elsewhere hands the endpoint over explicitly.
+- **Backchannel** — a short spoken filler the agent emits when an operation will take seconds ("let me check your corpus"); signals liveness without narrating content.
+- **Approval window** — the span while a proposed diff is pending, during which the user's next utterance is interpreted against that approval (approve / reject / amend) rather than as ordinary conversation.
 - **Academic-first search** — web search oriented at scholarly sources (arXiv, Semantic Scholar) with a find-paper → BibTeX → `.bib` loop; general web as secondary.
 - **Paper skeleton** — the whole-paper view the agent sees alongside the selected section: title, abstract, all section headings, and a one-line gist per section. Gists regenerate whenever a section file changes.
 - **Paper memory** — the small persistent list that survives across sections: decisions made, claims to keep consistent, terminology, open TODOs. Distilled at session end plus on voice command; user-editable.
