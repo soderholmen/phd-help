@@ -1,0 +1,473 @@
+[
+  {
+    "i": 1,
+    "text": "what do the papers in my corpus say about kv cache eviction policies",
+    "expect": [
+      "corpus_search"
+    ],
+    "got": [
+      "corpus_search"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 1.5,
+    "n_calls": 1,
+    "content": "",
+    "calls": [
+      {
+        "name": "corpus_search",
+        "args": "{\"query\": \"KV cache eviction policies\"}"
+      }
+    ]
+  },
+  {
+    "i": 2,
+    "text": "check whether I already have a paper on paged attention",
+    "expect": [
+      "corpus_search"
+    ],
+    "got": [
+      "corpus_search"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 1.6,
+    "n_calls": 1,
+    "content": "",
+    "calls": [
+      {
+        "name": "corpus_search",
+        "args": "{\"query\": \"paged attention virtual memory attention KV cache\"}"
+      }
+    ]
+  },
+  {
+    "i": 3,
+    "text": "um can you look in my library for anything on prefix caching I think t",
+    "expect": [
+      "corpus_search"
+    ],
+    "got": [
+      "corpus_search"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 1.5,
+    "n_calls": 1,
+    "content": "",
+    "calls": [
+      {
+        "name": "corpus_search",
+        "args": "{\"query\": \"prefix caching\"}"
+      }
+    ]
+  },
+  {
+    "i": 4,
+    "text": "pull up the evaluation section of the flexgen paper",
+    "expect": [
+      "corpus_doc",
+      "corpus_search"
+    ],
+    "got": [
+      "corpus_search"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 1.6,
+    "n_calls": 1,
+    "content": "",
+    "calls": [
+      {
+        "name": "corpus_search",
+        "args": "{\"query\": \"FlexGen evaluation experiments results throughput\"}"
+      }
+    ]
+  },
+  {
+    "i": 5,
+    "text": "open that h2o paper and read me what they say about heavy hitters",
+    "expect": [
+      "corpus_doc",
+      "corpus_search"
+    ],
+    "got": [
+      "corpus_search"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 2.0,
+    "n_calls": 1,
+    "content": "",
+    "calls": [
+      {
+        "name": "corpus_search",
+        "args": "{\"query\": \"heavy hitters H2O heavy hitter oracle eviction policy\", \"k\": 6}"
+      }
+    ]
+  },
+  {
+    "i": 6,
+    "text": "find me a two thousand twenty five paper on kv cache compression that ",
+    "expect": [
+      "web_search"
+    ],
+    "got": [
+      "corpus_search",
+      "web_search"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 2.9,
+    "n_calls": 2,
+    "content": "",
+    "calls": [
+      {
+        "name": "web_search",
+        "args": "{\"query\": \"2025 KV cache compression citing MLKE/MLC multi-head latent attention KV cache quantization\", \"source\": \"academic\"}"
+      },
+      {
+        "name": "corpus_search",
+        "args": "{\"query\": \"KV cache compression 2025 citing multi-head latent cache wan2023mlc\"}"
+      }
+    ]
+  },
+  {
+    "i": 7,
+    "text": "I need a citation for the claim that kv cache dominates memory at long",
+    "expect": [
+      "corpus_search",
+      "web_search"
+    ],
+    "got": [
+      "corpus_search",
+      "web_search"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 2.8,
+    "n_calls": 2,
+    "content": "I'll look for recent sources — first in your own corpus, then academic web.",
+    "calls": [
+      {
+        "name": "corpus_search",
+        "args": "{\"query\": \"KV cache memory dominates long context inference\"}"
+      },
+      {
+        "name": "web_search",
+        "args": "{\"query\": \"KV cache memory footprint long context LLM inference compression 2025\", \"source\": \"academic\"}"
+      }
+    ]
+  },
+  {
+    "i": 8,
+    "text": "search the general web for how llama cpp handles kv cache offloading",
+    "expect": [
+      "web_search"
+    ],
+    "got": [
+      "web_search"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 2.0,
+    "n_calls": 1,
+    "content": "",
+    "calls": [
+      {
+        "name": "web_search",
+        "args": "{\"query\": \"llama.cpp KV cache offloading mechanism --n-cache-dir mmap cache reuse\", \"source\": \"general\"}"
+      }
+    ]
+  },
+  {
+    "i": 9,
+    "text": "add a sentence after the flexgen citation saying that offloading trade",
+    "expect": [
+      "section_write"
+    ],
+    "got": [
+      "section_write"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 2.8,
+    "n_calls": 1,
+    "content": "",
+    "calls": [
+      {
+        "name": "section_write",
+        "args": "{\"find\": \"offloading moves cold pages to host memory\\n\\\\cite{sheng2023flexgen}.\", \"replace\": \"offloading moves cold pages to host memory\\n\\\\cite{sheng2023flexgen}, trading decode latency for cache capacity.\", \"reason\": \"Add note that offloading trades latency for capacity after FlexGen citation\"}"
+      }
+    ]
+  },
+  {
+    "i": 10,
+    "text": "reword the first sentence of the intro to lead with memory rather than",
+    "expect": [
+      "section_write"
+    ],
+    "got": [
+      "section_write"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 3.3,
+    "n_calls": 1,
+    "content": "",
+    "calls": [
+      {
+        "name": "section_write",
+        "args": "{\"find\": \"Large language model serving is bottlenecked by the key--value (KV) cache,\\nwhose size grows linearly with context length \\\\cite{wan2023mlc}.\", \"replace\": \"The key--value (KV) cache is the dominant consumer of GPU memory in large\\nlanguage model serving, growing linearly with context length \\\\cite{wan2023mlc}.\", \"reason\": \"Reword first sentence to lead with memory framing\"}"
+      }
+    ]
+  },
+  {
+    "i": 11,
+    "text": "delete the todo comment about positioning against twenty twenty five e",
+    "expect": [
+      "section_write"
+    ],
+    "got": [
+      "section_write"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 2.3,
+    "n_calls": 1,
+    "content": "",
+    "calls": [
+      {
+        "name": "section_write",
+        "args": "{\"find\": \"\\n% TODO: position our approach against recent 2025 eviction work.\\n\\n\", \"replace\": \"\\n\", \"reason\": \"Remove TODO comment about 2025 eviction work positioning\"}"
+      }
+    ]
+  },
+  {
+    "i": 12,
+    "text": "change the phrase low-attention tokens to tokens with low accumulated ",
+    "expect": [
+      "section_write"
+    ],
+    "got": [
+      "section_write"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 2.3,
+    "n_calls": 1,
+    "content": "",
+    "calls": [
+      {
+        "name": "section_write",
+        "args": "{\"find\": \"discard low-attention tokens outright\", \"replace\": \"discard tokens with low accumulated attention outright\", \"reason\": \"Rephrase per user: \\\"low-attention tokens\\\" → \\\"tokens with low accumulated attention\\\"\"}"
+      }
+    ]
+  },
+  {
+    "i": 13,
+    "text": "what did I write in the related work section about h2o",
+    "expect": [
+      "section_read"
+    ],
+    "got": [
+      "section_read"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 1.5,
+    "n_calls": 1,
+    "content": "",
+    "calls": [
+      {
+        "name": "section_read",
+        "args": "{\"section\": \"sections/related.tex\"}"
+      }
+    ]
+  },
+  {
+    "i": 14,
+    "text": "does the abstract already promise a latency improvement number",
+    "expect": [
+      "section_read"
+    ],
+    "got": [
+      "section_read"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 2.2,
+    "n_calls": 1,
+    "content": "I don't have the abstract in front of me — the intro is what's loaded in my context. Let me look for it.",
+    "calls": [
+      {
+        "name": "section_read",
+        "args": "{\"section\": \"abstract\"}"
+      }
+    ]
+  },
+  {
+    "i": 15,
+    "text": "find a recent paper on kv cache eviction and add a citation for it in ",
+    "expect": [
+      "corpus_search",
+      "web_search"
+    ],
+    "got": [
+      "web_search"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 1.8,
+    "n_calls": 1,
+    "content": "",
+    "calls": [
+      {
+        "name": "web_search",
+        "args": "{\"query\": \"KV cache eviction LLM 2025\", \"source\": \"academic\"}"
+      }
+    ]
+  },
+  {
+    "i": 16,
+    "text": "look up what mlc says about multi-turn conversations and work it into ",
+    "expect": [
+      "corpus_search"
+    ],
+    "got": [
+      "corpus_search"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 1.6,
+    "n_calls": 1,
+    "content": "",
+    "calls": [
+      {
+        "name": "corpus_search",
+        "args": "{\"query\": \"multi-turn conversations KV cache eviction\"}"
+      }
+    ]
+  },
+  {
+    "i": 17,
+    "text": "does the flow from the eviction paragraph into our approach feel abrup",
+    "expect": [
+      "none"
+    ],
+    "got": [
+      "none"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 5.0,
+    "n_calls": 0,
+    "content": "Somewhat, yes. Two issues: first, the second paragraph just opens \"In this paper we propose\" without saying what gap H2O and FlexGen leave — the reader has to infer why a hybrid is needed. Second, the",
+    "calls": []
+  },
+  {
+    "i": 18,
+    "text": "which of the three policies in paragraph one is closest to what we're ",
+    "expect": [
+      "none"
+    ],
+    "got": [
+      "none"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 4.8,
+    "n_calls": 0,
+    "content": "Of the three mentioned — H2O-style eviction, offloading, and (implicitly) our own approach — the closest to PagePin is H2O, since both are attention-based eviction policies scoring tokens by attention",
+    "calls": []
+  },
+  {
+    "i": 19,
+    "text": "read me back just the last sentence of this section",
+    "expect": [
+      "none"
+    ],
+    "got": [
+      "none"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 1.7,
+    "n_calls": 0,
+    "content": "The last sentence of the introduction reads:\n\n\"In this paper we propose PagePin, a hybrid eviction policy that combines attention-recency scoring with a pinned-page set for prompt tokens.\"",
+    "calls": []
+  },
+  {
+    "i": 20,
+    "text": "in the appendix I want to explain the protocol, so literally write the",
+    "expect": [
+      "none"
+    ],
+    "got": [
+      "section_write"
+    ],
+    "correct": false,
+    "malformed": true,
+    "flags": [
+      "missing-params:['reason', 'replace']"
+    ],
+    "secs": 3.0,
+    "n_calls": 1,
+    "content": "",
+    "calls": [
+      {
+        "name": "section_write",
+        "args": "{\"find\": \"In this paper we propose \\\\textsc{PagePin}, a hybrid eviction policy that\\ncombines attention-recency scoring with a pinned-page set for prompt tokens.\"}"
+      }
+    ]
+  },
+  {
+    "i": 21,
+    "text": "make three edits at once: one, capitalize hybrid in the last paragraph",
+    "expect": [
+      "section_write"
+    ],
+    "got": [
+      "section_write"
+    ],
+    "correct": true,
+    "malformed": false,
+    "flags": [],
+    "secs": 6.4,
+    "n_calls": 3,
+    "content": "",
+    "calls": [
+      {
+        "name": "section_write",
+        "args": "{\"find\": \"Eviction policies such as H2O discard low-attention tokens outright\\n\\\\cite{zhang2023h2o}, while offloading moves cold pages to host memory\\n\\\\cite{sheng2023flexgen}.\", \"replace\": \"Eviction policies such as H2O discard low-attention tokens pruned\\n\\\\cite{zhang2023h2o}, while offloading moves cold pages to host memory\\n\\\\cite{sheng2023flexgen}.\", \"reason\": \"Replace \\\"outright\\\" with \\\"pru"
+      },
+      {
+        "name": "section_write",
+        "args": "{\"find\": \"whose size grows linearly with context length \\\\cite{wan2023mlc}.\", \"replace\": \"whose size grows linearly with context length\\n\\\\cite{wan2023mlc}\\\\footnote{The quantization variant is discussed in\\nSection~\\\\ref{sec:evaluation}.}.\", \"reason\": \"Add footnote after mlc citation pointing to Section 4\"}"
+      },
+      {
+        "name": "section_write",
+        "args": "{\"find\": \"we propose \\\\textsc{PagePin}, a hybrid eviction\", \"replace\": \"we propose \\\\textsc{PagePin}, a Hybrid eviction\", \"reason\": \"Capitalize \\\"Hybrid\\\" in last paragraph\"}"
+      }
+    ]
+  }
+]
