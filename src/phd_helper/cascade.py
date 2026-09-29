@@ -1,0 +1,139 @@
+"""BibTeX resolution cascade (SPEC §6): stop at first success.
+
+arXiv id -> arxiv.org/bibtex/<id>; CS venue -> DBLP; DOI -> Crossref
+x-bibtex; last resort -> build from OpenAlex metadata. All HTTP goes
+through the injected fetcher — politeness rules (arXiv 3 s single
+connection, DBLP browser UA, Crossref mailto) live here, not in callers.
+"""
+
+import asyncio
+import json
+from dataclasses import dataclass
+from urllib.parse import quote_plus
+
+from phd_helper.bibtex import BibEntry, make_key, parse_entry
+
+# Anubis anti-bot on dblp.org wants a browser-like UA (SPEC §6).
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+
+
+@dataclass(frozen=True)
+class Lookup:
+    arxiv: str = ""
+    doi: str = ""
+    title: str = ""
+
+
+@dataclass(frozen=True)
+class Response:
+    status: int
+    body: str
+
+
+@dataclass(frozen=True)
+class ResolveResult:
+    entry: BibEntry | None
+    source: str | None
+    tried: tuple[str, ...] = ()
+
+
+class ArxivRateLimited:
+    """arXiv politeness (SPEC §6): one request per 3 s, single connection.
+
+    Wraps any fetcher; only arxiv.org URLs are spaced, everything else
+    passes straight through.
+    """
+
+    def __init__(self, fetch, sleep=asyncio.sleep, min_gap: float = 3.0):
+        self._fetch = fetch
+        self._sleep = sleep
+        self._min_gap = min_gap
+        self._pending = False
+
+    async def __call__(self, url, headers=None):
+        if "arxiv.org" in url and self._pending:
+            await self._sleep(self._min_gap)
+        resp = await self._fetch(url, headers)
+        if "arxiv.org" in url:
+            self._pending = True
+        return resp
+
+
+async def resolve_bibtex(lookup: Lookup, fetch,
+                         mailto: str = "") -> ResolveResult:
+    tried: list[str] = []
+    if lookup.arxiv:
+        tried.append("arxiv")
+        resp = await fetch(f"https://arxiv.org/bibtex/{lookup.arxiv}")
+        if resp.status == 200:
+            return ResolveResult(parse_entry(resp.body), "arxiv",
+                                 tuple(tried))
+    if lookup.title:
+        tried.append("dblp")
+        search = await fetch(
+            "https://dblp.org/search/publ/api?q="
+            f"{quote_plus(lookup.title)}&format=json")
+        key = _first_hit_key(search) if search.status == 200 else None
+        if key:
+            bib = await fetch(f"https://dblp.org/rec/{key}.bib",
+                              {"User-Agent": BROWSER_UA})
+            if bib.status == 200:
+                return ResolveResult(parse_entry(bib.body), "dblp",
+                                     tuple(tried))
+    if lookup.doi:
+        tried.append("crossref")
+        url = f"https://api.crossref.org/works/{quote_plus(lookup.doi)}/transform"
+        if mailto:
+            url += f"?mailto={quote_plus(mailto)}"  # polite pool (SPEC §6)
+        resp = await fetch(url)
+        if resp.status == 200:
+            return ResolveResult(parse_entry(resp.body), "crossref",
+                                 tuple(tried))
+    if lookup.doi or lookup.title:
+        tried.append("openalex")
+        if lookup.doi:
+            url = f"https://api.openalex.org/works/doi:{quote_plus(lookup.doi)}"
+        else:
+            url = f"https://api.openalex.org/works?search={quote_plus(lookup.title)}"
+        resp = await fetch(url + "&per-page=100")  # politeness (SPEC §6)
+        entry = _from_openalex(resp) if resp.status == 200 else None
+        if entry is not None:
+            return ResolveResult(entry, "openalex", tuple(tried))
+    return ResolveResult(None, None, tuple(tried))
+
+
+def _from_openalex(resp: Response) -> BibEntry | None:
+    """Last resort: build an entry from OpenAlex metadata (CC0, SPEC §6)."""
+    try:
+        data = json.loads(resp.body)
+        work = data.get("results", [data])[0] if (
+            data.get("results") or data.get("title")) else None
+        if work is None:
+            return None
+        authors = " and ".join(
+            _invert_name(a["author"]["display_name"])
+            for a in work.get("authorships", []))
+        fields = {"title": work.get("title", ""),
+                  "author": authors,
+                  "year": str(work.get("publication_year", ""))}
+    except (ValueError, KeyError, IndexError):
+        return None
+    if not fields["title"]:
+        return None
+    entry = BibEntry(key="", type="article", fields=fields)
+    return BibEntry(key=make_key(entry), type=entry.type, fields=fields)
+
+
+def _invert_name(display: str) -> str:
+    """'Ashish Vaswani' -> 'Vaswani, Ashish' — the bibtex surname-first form."""
+    parts = display.split()
+    return f"{parts[-1]}, {' '.join(parts[:-1])}" if len(parts) > 1 else display
+
+
+def _first_hit_key(search: Response) -> str | None:
+    try:
+        hits = json.loads(search.body)["result"]["hits"].get("hit", [])
+    except (ValueError, KeyError):
+        return None
+    return hits[0]["info"].get("key") if hits else None

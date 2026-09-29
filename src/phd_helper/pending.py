@@ -15,6 +15,9 @@ class PendingDiff:
     section_path: str
     patch: AnchoredPatch
     proposed_text: str
+    # The cite loop (§6): a bib entry rides the same approval as the patch.
+    bib_append: str | None = None
+    cite_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -34,7 +37,8 @@ class PendingDiffs:
         slug = section_path.replace("/", "__").replace("\\", "__")
         return self._root / slug
 
-    def propose(self, section_path: str, patch: AnchoredPatch, proposed_text: str) -> str:
+    def propose(self, section_path: str, patch: AnchoredPatch,
+                proposed_text: str, bib_append: str | None = None) -> str:
         d = self._dir(section_path)
         d.mkdir(parents=True, exist_ok=True)
         existing = [int(p.stem) for p in d.glob("*.json")]
@@ -46,6 +50,7 @@ class PendingDiffs:
                     "replace": patch.replace,
                     "base_hash": patch.base_hash,
                     "proposed_text": proposed_text,
+                    "bib_append": bib_append,
                 }
             ),
             encoding="utf-8",
@@ -67,6 +72,7 @@ class PendingDiffs:
                         meta["find"], meta["replace"], meta["base_hash"]
                     ),
                     proposed_text=meta["proposed_text"],
+                    bib_append=meta.get("bib_append"),
                 )
             )
         return diffs

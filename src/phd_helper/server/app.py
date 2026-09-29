@@ -15,12 +15,15 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from phd_helper.cascade import ArxivRateLimited
 from phd_helper.endpoint import VoiceEndpoint
 from phd_helper.project import Project
 from phd_helper.server.config import REPO_ROOT, load as load_config
+from phd_helper.server.http import HttpFetcher
 from phd_helper.server.llm import LlmClient, LlmError
 from phd_helper.server.voice import StubStt, StubTts, parse_control
-from phd_helper.tools import OFFERED, TOOL_SCHEMAS, execute, make_validators
+from phd_helper.tools import (OFFERED, TOOL_SCHEMAS, execute_async,
+                              make_validators)
 
 WEB_DIR = Path(__file__).resolve().parents[3] / "web"
 
@@ -80,14 +83,20 @@ class Session:
                     return
                 self.history.append(msg)  # assistant turn with tool_calls
                 for vc in valid_calls:
-                    result = execute(vc, project)
+                    result = await execute_async(
+                        vc, project, fetch=self.state.fetch,
+                        mailto=self.state.config.crossref_mailto)
                     if result.get("status") == "pending":
-                        # One-at-a-time diff awaiting approval (§5).
+                        # One-at-a-time diff awaiting approval (§5). The
+                        # result's find/replace are the final ones (cite_add
+                        # rewrites the \\cite key); section_write has none.
                         await self.send({"type": "diff",
                                          "diff_id": result["diff_id"],
                                          "section": result["section"],
-                                         "find": vc.args["find"],
-                                         "replace": vc.args["replace"]})
+                                         "find": result.get("find",
+                                                            vc.args["find"]),
+                                         "replace": result.get("replace",
+                                                               vc.args["replace"])})
                     self.history.append({"role": "tool",
                                          "tool_call_id": vc.id,
                                          "content": json.dumps(result)})
@@ -114,6 +123,9 @@ class AppState:
         self.llm = LlmClient(self.config)
         self.stt = StubStt()
         self.tts = StubTts()
+        # Cascade HTTP, arXiv-spaced (SPEC §6 politeness).
+        self.http = HttpFetcher()
+        self.fetch = ArxivRateLimited(self.http)
         self.endpoint = VoiceEndpoint(
             ping_interval=self.config.ping_interval_s,
             lease_timeout=self.config.lease_timeout_s)

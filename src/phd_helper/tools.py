@@ -7,6 +7,7 @@ diff that the user approves. Errors return as tool-result text so the model
 sees them (the bounce), never the user.
 """
 
+from phd_helper.cascade import Lookup, resolve_bibtex
 from phd_helper.project import Project, ProposeError
 
 TOOL_SCHEMAS = [
@@ -20,6 +21,33 @@ TOOL_SCHEMAS = [
                             "description": "Path relative to the project "
                                            "root, e.g. sections/intro.tex"}},
             "required": ["section"],
+            "additionalProperties": False}}},
+    {"type": "function", "function": {
+        "name": "cite_add",
+        "description": "Cite a paper in a section: resolves the BibTeX entry "
+                       "(arXiv id, DOI, or title), and proposes ONE pending "
+                       "diff covering the prose, the \\cite command, and the "
+                       "refs.bib entry. Cite the paper in replace with "
+                       "\\cite{<the id you passed>}.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "section": {"type": "string"},
+                "find": {"type": "string",
+                         "description": "Exact text to replace, quoted from "
+                                        "the section"},
+                "replace": {"type": "string",
+                            "description": "Replacement text containing "
+                                           "\\cite{<paper id>}"},
+                "arxiv": {"type": "string",
+                          "description": "arXiv id, empty if unknown"},
+                "doi": {"type": "string", "description": "DOI, empty if "
+                                                         "unknown"},
+                "title": {"type": "string",
+                          "description": "Paper title, empty if an id is "
+                                         "given"}},
+            "required": ["section", "find", "replace", "arxiv", "doi",
+                         "title"],
             "additionalProperties": False}}},
     {"type": "function", "function": {
         "name": "section_write",
@@ -55,7 +83,33 @@ def make_validators(project: Project) -> dict:
             return (f"find anchor not present in '{args['section']}' — "
                     "read the section and quote it exactly")
         return None
-    return {"section_write": find_exists}
+    return {"section_write": find_exists, "cite_add": find_exists}
+
+
+async def execute_async(call, project: Project, resolve=resolve_bibtex,
+                        fetch=None, mailto: str = "") -> dict:
+    """Async dispatch: cite_add runs the cascade; everything else is sync."""
+    if call.name != "cite_add":
+        return execute(call, project)
+    a = call.args
+    lookup = Lookup(arxiv=a.get("arxiv", ""), doi=a.get("doi", ""),
+                    title=a.get("title", ""))
+    result = await resolve(lookup, fetch, mailto)
+    if result.entry is None:
+        return {"error": f"could not resolve the paper (tried: "
+                         f"{', '.join(result.tried)})"}
+    try:
+        diff = project.propose_cite(a["section"], a["find"], a["replace"],
+                                    lookup, result.entry)
+    except ProposeError as e:
+        return {"error": str(e)}
+    except OSError:
+        return {"error": f"section '{a['section']}' does not exist"}
+    return {"status": "pending", "diff_id": diff.id,
+            "section": diff.section_path, "key": diff.cite_key,
+            "find": diff.patch.find, "replace": diff.patch.replace,
+            "note": "diff (prose + \\cite + bib entry) shown to the user; "
+                    "awaiting approval"}
 
 
 def execute(call, project: Project) -> dict:

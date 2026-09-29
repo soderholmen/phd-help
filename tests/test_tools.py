@@ -4,9 +4,12 @@ feeds client-side validation, and dispatch against a Project.
 
 import pytest
 
+from phd_helper.bibtex import BibEntry
+from phd_helper.cascade import Lookup, ResolveResult, Response
 from phd_helper.project import Project
 from phd_helper.toolcall import ValidCall
-from phd_helper.tools import OFFERED, TOOL_SCHEMAS, execute, make_validators
+from phd_helper.tools import (OFFERED, TOOL_SCHEMAS, execute,
+                              execute_async, make_validators)
 
 MAIN = ("\\documentclass{article}\n\\begin{document}\n"
         "\\input{sections/intro}\n\\end{document}\n")
@@ -82,3 +85,63 @@ def test_execute_section_write_lint_failure_bounces(paper):
 def test_execute_unknown_tool_is_error_not_crash(paper):
     result = execute(call("launch_missiles", {}), paper)
     assert "error" in result
+
+
+# -- cite_add (SPEC §6): async, cascade behind an injected resolver --------
+
+def fake_resolve(entry=None, source="arxiv", tried=("arxiv",)):
+    async def resolve(lookup, fetch, mailto=""):
+        return ResolveResult(entry, source if entry else None, tried)
+    return resolve
+
+
+RESOLVED = BibEntry(key="shazeer2024mesh", type="article", fields={
+    "title": "Mesh Anything", "author": "Shazeer, Noam", "year": "2024",
+    "arxiv": "2401.00002"})
+
+
+@pytest.mark.anyio
+async def test_cite_add_proposes_one_pending_diff(paper):
+    result = await execute_async(
+        call("cite_add", {"section": "sections/intro.tex",
+                          "find": "We use a transformer.",
+                          "replace": "We use a transformer "
+                                     "\\cite{2401.00002}.",
+                          "arxiv": "2401.00002", "doi": "", "title": ""}),
+        paper, resolve=fake_resolve(RESOLVED))
+    assert result["status"] == "pending"
+    assert result["key"] == "shazeer2024mesh"
+    assert "\\cite{shazeer2024mesh}" in result["replace"]  # rewritten
+    assert paper.read_section("sections/intro.tex") == INTRO  # not applied
+
+
+@pytest.mark.anyio
+async def test_cite_add_unresolved_paper_bounces(paper):
+    result = await execute_async(
+        call("cite_add", {"section": "sections/intro.tex",
+                          "find": "We use a transformer.",
+                          "replace": "x \\cite{2401.00002}.",
+                          "arxiv": "2401.00002", "doi": "", "title": ""}),
+        paper, resolve=fake_resolve(None, tried=("arxiv", "dblp",
+                                                 "crossref", "openalex")))
+    assert "error" in result
+    assert "arxiv" in result["error"]  # tried trace helps the model retry
+
+
+@pytest.mark.anyio
+async def test_cite_add_bad_anchor_bounces(paper):
+    result = await execute_async(
+        call("cite_add", {"section": "sections/intro.tex",
+                          "find": "not in there",
+                          "replace": "x \\cite{2401.00002}.",
+                          "arxiv": "2401.00002", "doi": "", "title": ""}),
+        paper, resolve=fake_resolve(RESOLVED))
+    assert "error" in result
+
+
+def test_cite_add_validator_checks_anchor(paper):
+    v = make_validators(paper)["cite_add"]
+    assert v({"section": "sections/intro.tex", "find": "It works well.",
+              "replace": "x", "arxiv": "1", "doi": "", "title": ""}) is None
+    assert v({"section": "sections/intro.tex", "find": "nope",
+              "replace": "x", "arxiv": "1", "doi": "", "title": ""})
