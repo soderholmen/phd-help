@@ -9,5 +9,14 @@ venv/
 keys.txt
 .probe/
 
+# Local TLS material (private CA + server key) — never commit
+certs/
+
 # Per-project app state (SPEC §7) — rides Syncthing, never committed
 .phd-helper/
+
+# Build artifacts
+*.egg-info/
+
+# Throwaway prototype scratch (source promoted to src/; logs only remain)
+prototype/

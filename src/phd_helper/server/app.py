@@ -211,6 +211,14 @@ def create_app() -> FastAPI:
         async def index():
             return FileResponse(WEB_DIR / "index.html")
         app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+
+    # Private-CA root cert for devices to install (public half only; the CA
+    # key never leaves certs/, which is gitignored).
+    ca_pem = REPO_ROOT / "certs" / "ca.pem"
+    if ca_pem.is_file():
+        @app.get("/ca.pem")
+        async def ca_pem_download():
+            return FileResponse(ca_pem, media_type="application/x-pem-file")
     return app
 
 

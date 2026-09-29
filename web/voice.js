@@ -4,7 +4,7 @@
 // never automatic). TTS playback queue + barge-in land with real TTS.
 const $ = (id) => document.getElementById(id);
 const ws = new WebSocket(
-  `ws://${location.host}/ws/voice?client=${Date.now()}-${Math.random()
+  `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/voice?client=${Date.now()}-${Math.random()
     .toString(36).slice(2, 8)}`);
 let armed = false, audioCtx = null, workletNode = null, micStream = null;
 let rms = 0, speaking = false;
