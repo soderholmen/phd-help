@@ -6,7 +6,7 @@ Glossary for phd-helper: a personal tool for co-writing research papers with a l
 
 - **Paper project** — a LaTeX paper as a multi-file project (root file + one `.tex` per section). The unit the tool operates on. Not yet started; the tool is general, built for papers that don't exist yet.
 - **Section-scoped discussion** — a conversation anchored to a selected section (or paragraph) of the paper. The agent sees that section and its sources, and writes back only into that section's file. The user's manual edits are never clobbered: the agent re-reads before writing.
-- **Reference corpus** — the persistent library of reference PDFs the user accumulates across their PhD. Auto-indexed from a drop folder; searchable by the agent (hybrid: keyword + semantic).
+- **Reference corpus** — the persistent library of reference PDFs the user accumulates across their PhD. Fed by two doors — web-UI upload and agent-fetched papers (no drop folder) — and indexed asynchronously with visible per-PDF status. Searchable by the agent only (hybrid: keyword + semantic).
 - **Dictation** — voice input of prose the agent should write, cleaned before it reaches the agent (disfluencies removed, spoken LaTeX normalized to markup).
 - **Conversation mode** — hands-free voice interaction, armed only by an explicit user toggle (never push-to-talk, never auto-armed): once on, VAD-driven capture, and the agent replies by voice (TTS) as well as on screen.
 - **Barge-in** — user speech that interrupts the agent while it speaks; it stops the agent's voice output immediately.
@@ -16,7 +16,7 @@ Glossary for phd-helper: a personal tool for co-writing research papers with a l
 - **Connection blip** — a brief client disconnection that ends neither the session nor the endpoint lease; arming and the voice endpoint survive it, and reconnect resumes mid-conversation.
 - **Endpoint lease** — the voice endpoint's time-bounded claim on the voice channel: survives connection blips, expires when the device stays unreachable, after which any client may take the channel by arming explicitly.
 - **Approval window** — the span while a proposed diff is pending, during which the user's next utterance is interpreted against that approval (approve / reject / amend) rather than as ordinary conversation.
-- **Academic-first search** — web search oriented at scholarly sources (arXiv, Semantic Scholar) with a find-paper → BibTeX → `.bib` loop; general web as secondary.
+- **Academic-first search** — web search oriented at scholarly sources (arXiv, Semantic Scholar) with a find-paper → BibTeX → `.bib` loop; general web as secondary. A found paper with an openly downloadable PDF auto-joins the reference corpus; paywalled papers yield a bib entry only.
 - **Paper skeleton** — the whole-paper view the agent sees alongside the selected section: title, abstract, all section headings, and a one-line gist per section. Gists regenerate whenever a section file changes.
 - **Paper memory** — the small persistent list that survives across sections: decisions made, claims to keep consistent, terminology, open TODOs. Distilled at session end plus on voice command; user-editable.
 - **Session** — one sitting within a paper project: started by opening the project, ended by project switch, server shutdown, or idle timeout. A paper spans many sessions; a session resumes the same history and memory rather than resetting them, and its end is where paper memory is distilled.
