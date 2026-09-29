@@ -8,6 +8,7 @@ connection, DBLP browser UA, Crossref mailto) live here, not in callers.
 
 import asyncio
 import json
+import time
 from dataclasses import dataclass
 from urllib.parse import quote_plus
 
@@ -45,19 +46,25 @@ class ArxivRateLimited:
     passes straight through.
     """
 
-    def __init__(self, fetch, sleep=asyncio.sleep, min_gap: float = 3.0):
+    def __init__(self, fetch, sleep=asyncio.sleep, clock=time.monotonic,
+                 min_gap: float = 3.0):
         self._fetch = fetch
         self._sleep = sleep
+        self._clock = clock
         self._min_gap = min_gap
-        self._pending = False
+        self._last: float | None = None  # when the last arxiv request started
+        self._lock = asyncio.Lock()
 
     async def __call__(self, url, headers=None):
-        if "arxiv.org" in url and self._pending:
-            await self._sleep(self._min_gap)
-        resp = await self._fetch(url, headers)
-        if "arxiv.org" in url:
-            self._pending = True
-        return resp
+        if "arxiv.org" not in url:
+            return await self._fetch(url, headers)
+        async with self._lock:  # single connection: serialize arxiv requests
+            if self._last is not None:
+                wait = self._min_gap - (self._clock() - self._last)
+                if wait > 0:
+                    await self._sleep(wait)  # only the remaining gap
+            self._last = self._clock()
+            return await self._fetch(url, headers)
 
 
 async def resolve_bibtex(lookup: Lookup, fetch,
@@ -66,9 +73,9 @@ async def resolve_bibtex(lookup: Lookup, fetch,
     if lookup.arxiv:
         tried.append("arxiv")
         resp = await fetch(f"https://arxiv.org/bibtex/{lookup.arxiv}")
-        if resp.status == 200:
-            return ResolveResult(parse_entry(resp.body), "arxiv",
-                                 tuple(tried))
+        entry = _try_parse(resp) if resp.status == 200 else None
+        if entry is not None:
+            return ResolveResult(entry, "arxiv", tuple(tried))
     if lookup.title:
         tried.append("dblp")
         search = await fetch(
@@ -78,29 +85,40 @@ async def resolve_bibtex(lookup: Lookup, fetch,
         if key:
             bib = await fetch(f"https://dblp.org/rec/{key}.bib",
                               {"User-Agent": BROWSER_UA})
-            if bib.status == 200:
-                return ResolveResult(parse_entry(bib.body), "dblp",
-                                     tuple(tried))
+            entry = _try_parse(bib) if bib.status == 200 else None
+            if entry is not None:
+                return ResolveResult(entry, "dblp", tuple(tried))
     if lookup.doi:
         tried.append("crossref")
         url = f"https://api.crossref.org/works/{quote_plus(lookup.doi)}/transform"
         if mailto:
             url += f"?mailto={quote_plus(mailto)}"  # polite pool (SPEC §6)
         resp = await fetch(url)
-        if resp.status == 200:
-            return ResolveResult(parse_entry(resp.body), "crossref",
-                                 tuple(tried))
+        entry = _try_parse(resp) if resp.status == 200 else None
+        if entry is not None:
+            return ResolveResult(entry, "crossref", tuple(tried))
     if lookup.doi or lookup.title:
         tried.append("openalex")
         if lookup.doi:
-            url = f"https://api.openalex.org/works/doi:{quote_plus(lookup.doi)}"
+            url = (f"https://api.openalex.org/works/doi:{quote_plus(lookup.doi)}"
+                   "?per-page=100")  # no '?' yet, so start the query here
         else:
-            url = f"https://api.openalex.org/works?search={quote_plus(lookup.title)}"
-        resp = await fetch(url + "&per-page=100")  # politeness (SPEC §6)
+            url = (f"https://api.openalex.org/works"
+                   f"?search={quote_plus(lookup.title)}&per-page=100")
+        resp = await fetch(url)  # per-page politeness cap (SPEC §6)
         entry = _from_openalex(resp) if resp.status == 200 else None
         if entry is not None:
             return ResolveResult(entry, "openalex", tuple(tried))
     return ResolveResult(None, None, tuple(tried))
+
+
+def _try_parse(resp: Response) -> BibEntry | None:
+    """Parse a 200 body as bibtex; a non-bibtex body (Anubis/captive-portal
+    HTML) is a cascade miss, not a crash."""
+    try:
+        return parse_entry(resp.body)
+    except ValueError:
+        return None
 
 
 def _from_openalex(resp: Response) -> BibEntry | None:
@@ -116,7 +134,7 @@ def _from_openalex(resp: Response) -> BibEntry | None:
             for a in work.get("authorships", []))
         fields = {"title": work.get("title", ""),
                   "author": authors,
-                  "year": str(work.get("publication_year", ""))}
+                  "year": str(work.get("publication_year") or "")}
     except (ValueError, KeyError, IndexError):
         return None
     if not fields["title"]:

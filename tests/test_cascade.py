@@ -3,6 +3,8 @@ OpenAlex-build, stopping at first success. Fake-HTTP seam: tests assert the
 recorded fetch calls (URLs, headers, order) — no real network.
 """
 
+import asyncio
+
 import pytest
 
 from phd_helper.cascade import (ArxivRateLimited, Lookup, Response,
@@ -129,8 +131,84 @@ async def test_arxiv_requests_spaced_by_three_seconds():
     async def sleep(seconds):
         slept.append(seconds)
 
-    polite = ArxivRateLimited(fetch, sleep=sleep)
+    now = [0.0]
+    polite = ArxivRateLimited(fetch, sleep=sleep, clock=lambda: now[0])
     await resolve_bibtex(Lookup(arxiv="1706.03762"), polite)
+    now[0] = 1.0  # only a second since the last request
     await resolve_bibtex(Lookup(arxiv="1706.03762"), polite)
-    assert slept == [3.0]  # first call free, second waits (SPEC §6)
+    assert slept == [2.0]  # remaining gap, not the full 3 s (SPEC §6)
     assert len(calls) == 2  # single connection: serial, never concurrent
+
+
+@pytest.mark.anyio
+async def test_arxiv_no_sleep_once_the_gap_already_elapsed():
+    fetch, calls = recorder(Response(200, ARXIV_BIB),
+                            Response(200, ARXIV_BIB))
+    slept = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+
+    now = [0.0]
+    polite = ArxivRateLimited(fetch, sleep=sleep, clock=lambda: now[0])
+    await resolve_bibtex(Lookup(arxiv="1706.03762"), polite)
+    now[0] = 10.0  # well past the 3 s gap
+    await resolve_bibtex(Lookup(arxiv="1706.03762"), polite)
+    assert slept == []  # a stale boolean must not force a needless wait
+    assert len(calls) == 2
+
+
+@pytest.mark.anyio
+async def test_concurrent_arxiv_requests_never_overlap():
+    in_flight: list[str] = []
+    peak: list[int] = []
+
+    async def fetch(url, headers=None):
+        in_flight.append(url)
+        peak.append(len(in_flight))
+        await asyncio.sleep(0)  # let a second request try to start
+        in_flight.pop()
+        return Response(200, ARXIV_BIB)
+
+    async def sleep(seconds):
+        pass
+
+    polite = ArxivRateLimited(fetch, sleep=sleep, clock=lambda: 0.0)
+    await asyncio.gather(
+        resolve_bibtex(Lookup(arxiv="1706.03762"), polite),
+        resolve_bibtex(Lookup(arxiv="1801.00001"), polite))
+    assert max(peak) == 1  # single connection, even under concurrency (§6)
+
+
+@pytest.mark.anyio
+async def test_openalex_doi_branch_puts_per_page_on_a_query_string():
+    # The DOI URL has no '?' yet: appending '&per-page=100' to it 404s.
+    fetch, calls = recorder(Response(404, ""),        # crossref misses
+                            Response(200, OPENALEX_WORK))
+    result = await resolve_bibtex(Lookup(doi="10.1234/cascade"), fetch)
+    assert result.source == "openalex"
+    assert calls[1][0] == ("https://api.openalex.org/works"
+                           "/doi:10.1234%2Fcascade?per-page=100")
+
+
+@pytest.mark.anyio
+async def test_non_bibtex_200_body_is_a_miss_not_a_crash():
+    # Anubis challenges and captive portals answer 200 with HTML; the
+    # cascade must fall through to the next source, not raise.
+    fetch, calls = recorder(Response(200, "<html>a challenge page</html>"),
+                            Response(404, ""),        # dblp search misses
+                            Response(200, OPENALEX_WORK))
+    result = await resolve_bibtex(
+        Lookup(arxiv="1706.03762", title="Attention Is All You Need"), fetch)
+    assert result.source == "openalex"
+
+
+@pytest.mark.anyio
+async def test_openalex_null_publication_year_yields_empty_year():
+    work = ('{"title": "Undated Thing", "publication_year": null, '
+            '"authorships": [{"author": {"display_name": "Ashish Vaswani"}}]}')
+    fetch, calls = recorder(Response(404, ""),        # crossref misses
+                            Response(200, work))
+    result = await resolve_bibtex(Lookup(doi="10.1/undated"), fetch)
+    assert result.source == "openalex"
+    assert result.entry.fields["year"] == ""  # not the string 'None'

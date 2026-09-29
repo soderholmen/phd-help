@@ -9,6 +9,7 @@ ZeroTier membership is the access control (§1).
 import asyncio
 import json
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -133,9 +134,15 @@ class AppState:
         self.project = Project(REPO_ROOT / "sample_paper")
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(title="phd-helper")
-    state = AppState()
+def create_app(state: "AppState | None" = None) -> FastAPI:
+    state = state or AppState()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        await state.http.aclose()  # release the shared client on shutdown
+
+    app = FastAPI(title="phd-helper", lifespan=lifespan)
     app.state.phd = state
 
     @app.get("/health")

@@ -108,3 +108,49 @@ def test_key_collision_with_a_different_paper_renumbers(paper):
     assert "\\cite{vaswani2017b}" in diff.proposed_text
     paper.apply_pending("sections/intro.tex", diff.id)
     assert "@article{vaswani2017b" in paper.read_bib()
+
+
+# -- approval-time bib discipline (review: propose-time checks go stale) --
+
+def test_second_approval_of_same_paper_skips_the_append(paper):
+    # Both diffs proposed while the bib lacked the entry; the second
+    # approval must reuse the landed entry, not duplicate the key.
+    d1 = paper.propose_cite(
+        "sections/intro.tex", find="We use a transformer.",
+        replace="We use a transformer \\cite{2401.00002}.",
+        lookup=Lookup(arxiv="2401.00002"), entry=new_entry())
+    d2 = paper.propose_cite(
+        "sections/intro.tex", find="It works well.",
+        replace="It works well \\cite{2401.00002}.",
+        lookup=Lookup(arxiv="2401.00002"), entry=new_entry())
+    assert paper.apply_pending("sections/intro.tex", d1.id).applied
+    assert paper.apply_pending("sections/intro.tex", d2.id).applied
+    assert paper.read_bib().count("@article{shazeer2024mesh") == 1
+
+
+def test_approval_bounces_when_key_taken_by_another_paper(paper):
+    diff = paper.propose_cite(
+        "sections/intro.tex", find="We use a transformer.",
+        replace="We use a transformer \\cite{2401.00002}.",
+        lookup=Lookup(arxiv="2401.00002"), entry=new_entry())
+    # Another session lands a different paper under the same key meanwhile.
+    (paper.root / "refs.bib").write_text(
+        paper.read_bib() + "@article{shazeer2024mesh,\n"
+        " title={Other Work},\n author={Other, O.},\n year={2024},\n"
+        " arxiv={9999.99999},\n}\n", encoding="utf-8")
+    result = paper.apply_pending("sections/intro.tex", diff.id)
+    assert not result.applied
+    assert "shazeer2024mesh" in result.reason
+    assert paper.read_section("sections/intro.tex") == INTRO  # wrote nothing
+    # stays pending so the user sees why
+    assert any(d.id == diff.id for d in paper.list_pending("sections/intro.tex"))
+
+
+def test_bib_append_starts_on_its_own_line(paper):
+    (paper.root / "refs.bib").write_text(BIB.rstrip("\n"), encoding="utf-8")
+    diff = paper.propose_cite(
+        "sections/intro.tex", find="We use a transformer.",
+        replace="We use a transformer \\cite{2401.00002}.",
+        lookup=Lookup(arxiv="2401.00002"), entry=new_entry())
+    paper.apply_pending("sections/intro.tex", diff.id)
+    assert "}\n@article{shazeer2024mesh" in paper.read_bib()  # not glued on

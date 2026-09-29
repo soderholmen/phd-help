@@ -129,6 +129,19 @@ async def test_cite_add_unresolved_paper_bounces(paper):
 
 
 @pytest.mark.anyio
+async def test_cite_add_without_a_fetcher_bounces_not_typeerror(paper):
+    # fetch defaults to None: a mis-wired caller must get a tool-error
+    # bounce, not a TypeError raised from inside the cascade.
+    result = await execute_async(
+        call("cite_add", {"section": "sections/intro.tex",
+                          "find": "We use a transformer.",
+                          "replace": "x \\cite{2401.00002}.",
+                          "arxiv": "2401.00002", "doi": "", "title": ""}),
+        paper)
+    assert "error" in result
+
+
+@pytest.mark.anyio
 async def test_cite_add_bad_anchor_bounces(paper):
     result = await execute_async(
         call("cite_add", {"section": "sections/intro.tex",

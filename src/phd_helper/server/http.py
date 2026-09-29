@@ -18,7 +18,13 @@ class HttpFetcher:
             headers={"Accept": "application/x-bibtex, application/json, */*"})
 
     async def __call__(self, url: str, headers: dict | None = None) -> Response:
-        r = await self._http.get(url, headers=headers or {})
+        try:
+            r = await self._http.get(url, headers=headers or {})
+        except httpx.HTTPError as e:
+            # A dead connection is a cascade miss (status 0), not an
+            # exception: the turn bounces with a reason instead of dying
+            # silently (SPEC §8 error matrix).
+            return Response(0, f"{type(e).__name__}: {e}")
         return Response(r.status_code, r.text)
 
     async def aclose(self):

@@ -32,11 +32,16 @@ def parse_bib(text: str) -> list[BibEntry]:
 
 
 def parse_entry(text: str) -> BibEntry:
-    """Parse one @type{key, field = {value}, ...} entry."""
+    """Parse one @type{key, field = value, ...} entry.
+
+    Values may be braced ({...}, nested), quoted ("..."), or bare
+    (year=2017, pages=1--10). A malformed field never aborts the entry:
+    an unterminated quote takes the remainder, and parsing always
+    terminates (i strictly increases each iteration).
+    """
     at = text.index("@")
     brace = text.index("{", at)
-    head, rest = text[brace + 1:], text[brace + 1:]
-    key, _, body = head.partition(",")
+    key, _, body = text[brace + 1:].partition(",")
     fields: dict[str, str] = {}
     i = 0
     while True:
@@ -45,16 +50,34 @@ def parse_entry(text: str) -> BibEntry:
             break
         name = name_m.group(1).lower()
         j = i + name_m.end()
-        if j >= len(body) or body[j] not in "{\":":
+        value, j = _read_value(body, j)
+        fields[name] = value.strip()
+        comma = body.find(",", j)
+        if comma == -1:
             break
-        if body[j] in "{\":":
-            close = _matching_brace(body, j) if body[j] == "{" else \
-                body.index(body[j], j + 1)
-            fields[name] = body[j + 1:close].strip()
-            j = close + 1
-        i = j + body[j:].find(",") + 1 if "," in body[j:] else len(body)
+        i = comma + 1
     return BibEntry(key=key.strip(), type=text[at + 1:brace].strip().lower(),
                     fields=fields)
+
+
+def _read_value(body: str, j: int) -> tuple[str, int]:
+    """Read the field value at body[j]; return (value, index after it)."""
+    if j < len(body) and body[j] == "{":
+        try:
+            close = _matching_brace(body, j)
+        except ValueError:
+            return body[j + 1:], len(body)  # unbalanced: take the remainder
+        return body[j + 1:close], close + 1
+    if j < len(body) and body[j] in "\"'":
+        quote = body[j]
+        close = body.find(quote, j + 1)
+        if close == -1:
+            return body[j + 1:], len(body)  # unterminated quote: no crash
+        return body[j + 1:close], close + 1
+    bare = re.match(r"[^,\s}]+", body[j:])  # bare token: 2017, 1--10, jan
+    if bare:
+        return bare.group(0), j + bare.end()
+    return "", j
 
 
 def _matching_brace(text: str, open_at: int) -> int:
@@ -93,20 +116,23 @@ def dedupe_key(key: str, existing: set[str]) -> str:
 
 
 def same_paper(a: BibEntry, b: BibEntry) -> bool:
-    """Identifier match: same arXiv id (version-insensitive) or same DOI."""
-    for field in ("arxiv", "doi"):
-        va = _norm_id(field, a.fields.get(field, ""))
-        vb = _norm_id(field, b.fields.get(field, ""))
-        if va and vb and va == vb:
-            return True
-    return False
+    """Identifier match: same arXiv id (version-insensitive) or same DOI.
+
+    The arXiv id lives in 'arxiv' for entries we build, but in 'eprint'
+    for arXiv's own bibtex — check both, or re-citing an owned arXiv paper
+    would duplicate it instead of reusing its key (SPEC §6).
+    """
+    aid, bid = _arxiv_id(a), _arxiv_id(b)
+    if aid and bid and aid == bid:
+        return True
+    adoi = a.fields.get("doi", "").strip().lower()
+    bdoi = b.fields.get("doi", "").strip().lower()
+    return bool(adoi and bdoi and adoi == bdoi)
 
 
-def _norm_id(field: str, value: str) -> str:
-    value = value.strip().lower()
-    if field == "arxiv":
-        return re.sub(r"v\d+$", "", value.removeprefix("arxiv:"))
-    return value
+def _arxiv_id(entry: BibEntry) -> str:
+    raw = (entry.fields.get("arxiv") or entry.fields.get("eprint") or "")
+    return re.sub(r"v\d+$", "", raw.strip().lower().removeprefix("arxiv:"))
 
 
 def make_key(entry: BibEntry) -> str:

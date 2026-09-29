@@ -9,7 +9,7 @@ persistence lives in ``.phd-helper/`` inside the project folder.
 from pathlib import Path
 
 from phd_helper.bibtex import (BibEntry, dedupe_key, format_entry, make_key,
-                               parse_bib, same_paper, with_key)
+                               parse_bib, parse_entry, same_paper, with_key)
 from phd_helper.history import SectionHistory
 from phd_helper.lint import lint_latex
 from phd_helper.pending import PendingDiff, PendingDiffs
@@ -119,20 +119,35 @@ class Project:
         return self.pending.list_pending(path)
 
     def apply_pending(self, path: str, diff_id: str) -> ApplyResult:
-        """Approve: clobber check / re-anchor, snapshot, write, record."""
+        """Approve: bib re-check, clobber check / re-anchor, snapshot, write."""
         pend = [d for d in self.pending.list_pending(path) if d.id == diff_id]
         if not pend:
             return ApplyResult(applied=False, reason="no such pending diff")
         diff = pend[0]
+        append = diff.bib_append
+        if append is not None:
+            # Propose-time checks go stale: re-check the key at approval (§6).
+            incoming = parse_entry(append)
+            held = {e.key: e for e in parse_bib(self.read_bib())}.get(
+                incoming.key)
+            if held is not None:
+                if not same_paper(held, incoming):
+                    return ApplyResult(
+                        applied=False,
+                        reason=f"key '{held.key}' was taken by another paper "
+                               "since this diff was proposed")
+                append = None  # identical entry already landed: skip append
         current = self.read_section(path)
         result = apply_patch(current, diff.patch)
         if not result.applied:
             return result  # ambiguous re-anchor: reason shown, stays pending
         self.write_section(path, result.text)
-        if diff.bib_append:
+        if append:
             # One approval covers all three (§6): the entry rides the diff.
-            (self.root / "refs.bib").write_text(
-                self.read_bib() + diff.bib_append, encoding="utf-8")
+            bib = self.read_bib()
+            if bib and not bib.endswith("\n"):
+                bib += "\n"  # never glue the entry onto the last line
+            (self.root / "refs.bib").write_text(bib + append, encoding="utf-8")
         self.history.record_apply(path, current, diff.patch, result.text)
         self.pending.resolve(path, diff_id)
         return result

@@ -5,7 +5,7 @@ significant title word, the SPEC's worked example.
 """
 
 from phd_helper.bibtex import (BibEntry, dedupe_key, format_entry, make_key,
-                               parse_entry, same_paper)
+                               parse_bib, parse_entry, same_paper)
 
 
 def entry(**fields):
@@ -59,3 +59,31 @@ def test_same_paper_matches_on_arxiv_id_or_doi():
     assert same_paper(c, d)
     assert not same_paper(a, c)
     assert not same_paper(a, e)
+
+
+# -- robustness gaps the review found (verified by probe) ------------------
+
+def test_same_paper_matches_arxiv_entries_stored_as_eprint():
+    # arXiv's own bibtex puts the id in eprint (+ version suffix), not 'arxiv'.
+    a = parse_entry("@misc{vaswani2017,\n title={Attention},\n"
+                    " author={Vaswani, A.},\n year={2017},\n"
+                    " eprint={1706.03762},\n archivePrefix={arXiv},\n}\n")
+    b = parse_entry("@misc{other,\n title={Attention Is All You Need},\n"
+                    " author={Vaswani, Ashish},\n year={2017},\n"
+                    " eprint={1706.03762v7},\n archivePrefix={arXiv},\n}\n")
+    assert same_paper(a, b)
+
+
+def test_parse_entry_keeps_fields_after_an_unbraced_value():
+    e = parse_entry("@article{k,\n title={X},\n pages=1--10,\n"
+                    " year={2020},\n doi={10.1/x},\n}\n")
+    assert e.fields["pages"] == "1--10"
+    assert e.fields["year"] == "2020"
+    assert e.fields["doi"] == "10.1/x"
+
+
+def test_parse_bib_survives_an_unterminated_quote():
+    text = ('@article{good,\n title={Fine},\n year={2020},\n}\n'
+            '@article{bad,\n title="oops no close,\n year={2021},\n}\n')
+    entries = parse_bib(text)  # must not raise
+    assert any(e.key == "good" for e in entries)

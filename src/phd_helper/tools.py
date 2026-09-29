@@ -91,6 +91,11 @@ async def execute_async(call, project: Project, resolve=resolve_bibtex,
     """Async dispatch: cite_add runs the cascade; everything else is sync."""
     if call.name != "cite_add":
         return execute(call, project)
+    if fetch is None and resolve is resolve_bibtex:
+        # The real cascade needs an HTTP fetcher; a mis-wired caller gets a
+        # tool-error bounce, never a TypeError from inside the cascade.
+        # (An injected resolver owns its own fetcher, if any.)
+        return {"error": "citation lookup unavailable (no HTTP fetcher)"}
     a = call.args
     lookup = Lookup(arxiv=a.get("arxiv", ""), doi=a.get("doi", ""),
                     title=a.get("title", ""))
