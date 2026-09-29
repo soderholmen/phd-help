@@ -3,6 +3,18 @@ name = "phd-helper"
 version = "0.1.0"
 description = "Voice-first co-writing agent for LaTeX papers, on local models."
 requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "httpx",
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
