@@ -4,3 +4,6 @@ __pycache__/
 *.pyd
 .venv/
 venv/
+
+# Local secrets (API keys) — never commit
+keys.txt
