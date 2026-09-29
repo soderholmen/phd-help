@@ -16,9 +16,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from phd_helper.endpoint import VoiceEndpoint
-from phd_helper.server.config import load as load_config
+from phd_helper.project import Project
+from phd_helper.server.config import REPO_ROOT, load as load_config
 from phd_helper.server.llm import LlmClient, LlmError
 from phd_helper.server.voice import StubStt, StubTts, parse_control
+from phd_helper.tools import OFFERED, TOOL_SCHEMAS, execute, make_validators
 
 WEB_DIR = Path(__file__).resolve().parents[3] / "web"
 
@@ -44,8 +46,10 @@ class Session:
         self.client_id = client_id
         self.ws: WebSocket | None = None
         self.turn_task: asyncio.Task | None = None
-        self.history: list[dict] = [{"role": "system",
-                                     "content": SYSTEM_PROMPT}]
+        sections = ", ".join(n.path for n in app_state.project.section_tree())
+        self.history: list[dict] = [{"role": "system", "content":
+                                     SYSTEM_PROMPT +
+                                     f"\nProject sections: {sections}"}]
 
     async def send(self, event: dict):
         if self.ws is not None:
@@ -59,15 +63,36 @@ class Session:
             self.turn_task.cancel()
         self.history.append({"role": "user", "content": user_text})
         await self.send({"type": "turn_started"})
+        project = self.state.project
         try:
-            msg, valid_calls, text = await self.state.llm.chat(self.history)
-            self.history.append({"role": "assistant",
-                                 "content": text or ""})
-            await self.send({"type": "assistant_text", "text": text})
-            # TTS seam: sentence-by-sentence synthesis lands with the
-            # 3090 stack; the stub counts the request so health is real.
-            async for _chunk in self.state.tts.synthesize(text):
-                pass  # binary audio frames go out here
+            for _ in range(5):  # tool loop; the model ends with a text turn
+                msg, valid_calls, text = await self.state.llm.chat(
+                    self.history, tools=TOOL_SCHEMAS, offered=OFFERED,
+                    validators=make_validators(project))
+                if not valid_calls:
+                    self.history.append({"role": "assistant",
+                                         "content": text or ""})
+                    await self.send({"type": "assistant_text", "text": text})
+                    # TTS seam: sentence-by-sentence synthesis lands with
+                    # the 3090 stack; the stub counts the request.
+                    async for _chunk in self.state.tts.synthesize(text):
+                        pass  # binary audio frames go out here
+                    return
+                self.history.append(msg)  # assistant turn with tool_calls
+                for vc in valid_calls:
+                    result = execute(vc, project)
+                    if result.get("status") == "pending":
+                        # One-at-a-time diff awaiting approval (§5).
+                        await self.send({"type": "diff",
+                                         "diff_id": result["diff_id"],
+                                         "section": result["section"],
+                                         "find": vc.args["find"],
+                                         "replace": vc.args["replace"]})
+                    self.history.append({"role": "tool",
+                                         "tool_call_id": vc.id,
+                                         "content": json.dumps(result)})
+            await self.send({"type": "error", "where": "loop",
+                             "message": "tool loop budget exhausted"})
         except asyncio.CancelledError:
             # Barge-in while thinking: abort, keep history consistent.
             self.history.append({"role": "assistant",
@@ -92,6 +117,8 @@ class AppState:
         self.endpoint = VoiceEndpoint(
             ping_interval=self.config.ping_interval_s,
             lease_timeout=self.config.lease_timeout_s)
+        # One active project at a time (§7); scaffold ships the sample paper.
+        self.project = Project(REPO_ROOT / "sample_paper")
 
 
 def create_app() -> FastAPI:
@@ -165,6 +192,19 @@ def create_app() -> FastAPI:
             # Qualifying interrupt: stop TTS now, abort thinking (§3).
             session.cancel_turn()
             await session.send({"type": "tts_stopped"})
+        elif kind in ("approve", "reject"):
+            section, diff_id = msg.get("section"), msg.get("diff_id")
+            if kind == "approve":
+                result = state.project.apply_pending(section, diff_id)
+                await session.send({
+                    "type": "diff_resolved", "diff_id": diff_id,
+                    "applied": result.applied, "reason": result.reason,
+                    "text": result.text})
+            else:
+                state.project.reject_pending(section, diff_id)
+                await session.send({"type": "diff_resolved",
+                                    "diff_id": diff_id, "applied": False,
+                                    "reason": "discarded", "text": None})
 
     if WEB_DIR.is_dir():
         @app.get("/")

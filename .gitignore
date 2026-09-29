@@ -8,3 +8,6 @@ venv/
 # Local secrets (API keys) — never commit
 keys.txt
 .probe/
+
+# Per-project app state (SPEC §7) — rides Syncthing, never committed
+.phd-helper/

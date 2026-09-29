@@ -15,12 +15,30 @@ function log(who, text) {
   $('transcript').appendChild(li);
 }
 
+function renderDiff(msg) {
+  const li = document.createElement('li');
+  li.innerHTML = `<b>diff</b> <code>${msg.section}</code><br>
+    <del>${msg.find}</del> → <ins>${msg.replace}</ins><br>
+    <button data-a="approve">Apply</button>
+    <button data-a="reject">Discard</button>`;
+  li.querySelectorAll('button').forEach((b) => (b.onclick = () => {
+    ws.send(JSON.stringify({ type: b.dataset.a,
+                             diff_id: msg.diff_id, section: msg.section }));
+    b.parentElement.querySelectorAll('button').forEach((x) => (x.disabled = true));
+  }));
+  $('transcript').appendChild(li);
+}
+
 ws.onmessage = (ev) => {
   const msg = JSON.parse(ev.data);
   if (msg.type === 'assistant_text') { log('agent', msg.text); speaking = false; }
   else if (msg.type === 'turn_started') { speaking = true; }
   else if (msg.type === 'turn_interrupted') { log('agent', '[interrupted]'); speaking = false; }
   else if (msg.type === 'armed') { log('sys', msg.ok ? 'armed (endpoint ours)' : `armed elsewhere: ${msg.holder}`); }
+  else if (msg.type === 'diff') { renderDiff(msg); }
+  else if (msg.type === 'diff_resolved') {
+    log('sys', msg.applied ? 'applied ✓' : `not applied: ${msg.reason}`);
+  }
   else if (msg.type === 'error') { log('sys', `error[${msg.where}]: ${msg.message}`); }
 };
 

@@ -52,7 +52,8 @@ class StubTts:
         return False
 
 
-CONTROL_TYPES = {"heartbeat", "arm", "disarm", "typed", "barge_in"}
+CONTROL_TYPES = {"heartbeat", "arm", "disarm", "typed", "barge_in",
+                 "approve", "reject"}
 
 
 def parse_control(text: str) -> dict:
