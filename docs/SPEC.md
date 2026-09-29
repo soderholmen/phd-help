@@ -30,16 +30,16 @@ Every decision here was made on the [wayfinder map](https://github.com/soderholm
 
 ## 2. Serving setup
 
-*(Source: [Document the serving setup](https://github.com/soderholmen/phd-help/issues/13), [Qwen3 tool-calling on vLLM](https://github.com/soderholmen/phd-help/issues/4). Status: decided, **not yet deployed** — the build effort launches against this record.)*
+*(Source: [Document the serving setup](https://github.com/soderholmen/phd-help/issues/13), [Qwen3 tool-calling on vLLM](https://github.com/soderholmen/phd-help/issues/4). Status: **deployed 2026-09-29** at the live endpoint below; one deviation open — MTP is ON on the running server, relaunch with it OFF pending server shell access.)*
 
 - **Model**: `local-inference-lab/Qwen3.8-Flash-Next-NVFP4` (N-gram/PLE table FP4-quantized, offloaded to ~27 GiB host RAM; host has 64 GB).
 - **Serving path**: docker image `ghcr.io/local-inference-lab/vllm:karmic-kraken-beta`, turnkey profile `qwen38-flash-next`, TP1. **Plain `pip install vllm` cannot serve this model.**
 - **Launch flags**: `--enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 --tool-strict-level function --max-model-len 262144`, env `VLLM_PLE_CPU_OFFLOAD=1`. (`qwen3_xml` is the same parser class in vLLM ≥0.30.)
-- **MTP / speculative decoding: OFF at launch** (open tool-call corruption bug, vllm#56077 family). Re-enabling is a post-build measurement, not a launch option.
-- **Endpoint**: `http://10.60.0.81:8000` (ZeroTier). Context 262K; measured 173–190 tok/s decode, TTFT ~190 ms @1K in.
+- **MTP / speculative decoding: OFF at launch** (open tool-call corruption bug, vllm#56077 family). Re-enabling is a post-build measurement, not a launch option. **Deviation (2026-09-29):** the deployed server runs with MTP ON (spec-decode active, ~74/53/39% per-position acceptance); a 6-turn multi-turn tool-call probe found no corruption, but the OFF decision stands — relaunch pending server shell access.
+- **Endpoint**: `http://10.147.242.50:8888` (ZeroTier, API-key auth — key in the local key store, never in the repo). Context 262K. First-run measurements 2026-09-29 (non-thinking, n=3 medians): decode **44.6 tok/s**, TTFT **~388 ms @1K in**. The earlier 173–190 tok/s / ~190 ms figures did not reproduce on this deployment; cause unknown until server-side checks land.
 - **Fallback order**: (1) decided NVFP4 path; (2) `Qwen3.8-27B-FP8` via pip vLLM ≥0.17, same flags with `qwen3_xml`, ~2× slower; (3) official `vllm/vllm-openai:qwen38-flash-next` image + patch stack + +16 GB RAM, only if both fail.
 - **Sampling (agentic, thinking mode)**: `temperature=1.0, top_p=0.95, top_k=20, min_p=0.0, presence_penalty=0.0, repetition_penalty=1.0`; generous max_tokens (never starve thinking — truncated thinking drops tool calls). Non-thinking mode: `temp 0.7 / top_p 0.8 / presence_penalty 1.5`.
-- **Pending first-run facts** (build effort measures, not decisions): image digest, free-VRAM check, MTP re-validation.
+- **Pending first-run facts** (build effort measures, not decisions): image digest and free-VRAM check — still open, blocked on server shell access; MTP re-validation — superseded by the deviation note above (server must be relaunched with MTP OFF, then re-measure decode/TTFT).
 
 ### Tool-calling contract
 
@@ -230,7 +230,7 @@ Track mute/ended, device change, unplug ⇒ **auto-reacquire and stay armed** (a
 Open items the build inherits (none are decisions):
 
 1. **API keys** — [Request a Semantic Scholar API key](https://github.com/soderholmen/phd-help/issues/14): request submitted, awaiting the key (~1-month backlog possible); record storage location on resolution. OpenAlex key: instant, same env file.
-2. **First-run serving measurements** — image digest, free-VRAM check, MTP re-validation (§2).
+2. **First-run serving measurements** — image digest and free-VRAM check still open (need server shell access); endpoint + decode/TTFT measured 2026-09-29 and recorded in §2. **Relaunch the serving profile with MTP OFF** when shell access is available (§2 deviation).
 3. **On-device mobile verification** — the 5-item checklist in `docs/research/mobile-browser-voice.md` (branch `research/mobile-browser-voice`), especially the Android OEM battery-manager wildcard and iOS cert/hostname setup.
 4. **Prototype assets** (throwaway, decision sources only): branches `proto/voice-loop` (latency dashboard, hangover slider) and `proto/tool-reliability` (probe harness).
 

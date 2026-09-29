@@ -7,3 +7,4 @@ venv/
 
 # Local secrets (API keys) — never commit
 keys.txt
+.probe/
