@@ -1,0 +1,9 @@
+[project]
+name = "phd-helper"
+version = "0.1.0"
+description = "Voice-first co-writing agent for LaTeX papers, on local models."
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
