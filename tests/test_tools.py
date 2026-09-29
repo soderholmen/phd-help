@@ -7,6 +7,7 @@ import pytest
 from phd_helper.bibtex import BibEntry
 from phd_helper.cascade import Lookup, ResolveResult, Response
 from phd_helper.project import Project
+from phd_helper.search import PaperHit
 from phd_helper.toolcall import ValidCall
 from phd_helper.tools import (OFFERED, TOOL_SCHEMAS, execute,
                               execute_async, make_validators)
@@ -150,6 +151,45 @@ async def test_cite_add_bad_anchor_bounces(paper):
                           "arxiv": "2401.00002", "doi": "", "title": ""}),
         paper, resolve=fake_resolve(RESOLVED))
     assert "error" in result
+
+
+# -- web_search (SPEC §6): discovery feeding cite_add -----------------------
+
+def fake_search(hits):
+    async def search(query, fetch, mailto=""):
+        return hits
+    return search
+
+
+HITS = [PaperHit(title="Mesh Anything", authors=("Shazeer, Noam",),
+                 year="2024", arxiv="2401.00002", doi="", venue="arXiv",
+                 source="arxiv")]
+
+
+@pytest.mark.anyio
+async def test_web_search_returns_candidates_for_the_model(paper):
+    result = await execute_async(
+        call("web_search", {"query": "mesh anything"}), paper,
+        search=fake_search(HITS))
+    hit = result["results"][0]
+    assert hit["n"] == 1
+    assert hit["title"] == "Mesh Anything" and hit["arxiv"] == "2401.00002"
+    assert hit["authors"] == "Shazeer, Noam"  # compact for the model
+    assert "cite_add" in result["note"]  # the chain the model should take
+
+
+@pytest.mark.anyio
+async def test_web_search_empty_is_a_result_not_an_error(paper):
+    result = await execute_async(
+        call("web_search", {"query": "zzz"}), paper, search=fake_search([]))
+    assert result["results"] == []
+    assert "error" not in result
+
+
+@pytest.mark.anyio
+async def test_web_search_without_a_fetcher_bounces(paper):
+    result = await execute_async(call("web_search", {"query": "x"}), paper)
+    assert "search unavailable" in result["error"]
 
 
 def test_cite_add_validator_checks_anchor(paper):

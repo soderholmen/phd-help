@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from urllib.parse import quote_plus
 
-from phd_helper.bibtex import BibEntry, make_key, parse_entry
+from phd_helper.bibtex import BibEntry, invert_name, make_key, parse_entry
 
 # Anubis anti-bot on dblp.org wants a browser-like UA (SPEC §6).
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -130,7 +130,7 @@ def _from_openalex(resp: Response) -> BibEntry | None:
         if work is None:
             return None
         authors = " and ".join(
-            _invert_name(a["author"]["display_name"])
+            invert_name(a["author"]["display_name"])
             for a in work.get("authorships", []))
         fields = {"title": work.get("title", ""),
                   "author": authors,
@@ -141,12 +141,6 @@ def _from_openalex(resp: Response) -> BibEntry | None:
         return None
     entry = BibEntry(key="", type="article", fields=fields)
     return BibEntry(key=make_key(entry), type=entry.type, fields=fields)
-
-
-def _invert_name(display: str) -> str:
-    """'Ashish Vaswani' -> 'Vaswani, Ashish' — the bibtex surname-first form."""
-    parts = display.split()
-    return f"{parts[-1]}, {' '.join(parts[:-1])}" if len(parts) > 1 else display
 
 
 def _first_hit_key(search: Response) -> str | None:

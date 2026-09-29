@@ -9,6 +9,7 @@ sees them (the bounce), never the user.
 
 from phd_helper.cascade import Lookup, resolve_bibtex
 from phd_helper.project import Project, ProposeError
+from phd_helper.search import search_papers
 
 TOOL_SCHEMAS = [
     {"type": "function", "function": {
@@ -21,6 +22,21 @@ TOOL_SCHEMAS = [
                             "description": "Path relative to the project "
                                            "root, e.g. sections/intro.tex"}},
             "required": ["section"],
+            "additionalProperties": False}}},
+    {"type": "function", "function": {
+        "name": "web_search",
+        "description": "Search for papers (arXiv title search + OpenAlex "
+                       "topics). Returns candidate papers with their ids; "
+                       "pick the right one and call cite_add with its "
+                       "arxiv or doi.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string",
+                          "description": "Words that identify the paper: "
+                                         "title, topic, or author and "
+                                         "topic"}},
+            "required": ["query"],
             "additionalProperties": False}}},
     {"type": "function", "function": {
         "name": "cite_add",
@@ -87,8 +103,25 @@ def make_validators(project: Project) -> dict:
 
 
 async def execute_async(call, project: Project, resolve=resolve_bibtex,
-                        fetch=None, mailto: str = "") -> dict:
-    """Async dispatch: cite_add runs the cascade; everything else is sync."""
+                        search=search_papers, fetch=None, mailto: str = "",
+                        openalex_mailto: str = "") -> dict:
+    """Async dispatch: web_search and cite_add hit the network; the rest
+    is sync."""
+    if call.name == "web_search":
+        if fetch is None and search is search_papers:
+            # The real search needs an HTTP fetcher; mis-wiring bounces.
+            return {"error": "search unavailable (no HTTP fetcher)"}
+        hits = await search(call.args["query"], fetch,
+                            mailto=openalex_mailto)
+        return {"results": [{"n": i, "title": h.title,
+                             "authors": " and ".join(h.authors),
+                             "year": h.year, "arxiv": h.arxiv,
+                             "doi": h.doi, "venue": h.venue}
+                            for i, h in enumerate(hits, 1)],
+                "note": ("pass the chosen paper's arxiv or doi to cite_add"
+                         if hits else
+                         "no candidates — rephrase the query or ask the "
+                         "user")}
     if call.name != "cite_add":
         return execute(call, project)
     if fetch is None and resolve is resolve_bibtex:

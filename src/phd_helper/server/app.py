@@ -86,7 +86,8 @@ class Session:
                 for vc in valid_calls:
                     result = await execute_async(
                         vc, project, fetch=self.state.fetch,
-                        mailto=self.state.config.crossref_mailto)
+                        mailto=self.state.config.crossref_mailto,
+                        openalex_mailto=self.state.config.openalex_mailto)
                     if result.get("status") == "pending":
                         # One-at-a-time diff awaiting approval (§5). The
                         # result's find/replace are the final ones (cite_add

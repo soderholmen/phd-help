@@ -135,6 +135,12 @@ def _arxiv_id(entry: BibEntry) -> str:
     return re.sub(r"v\d+$", "", raw.strip().lower().removeprefix("arxiv:"))
 
 
+def invert_name(display: str) -> str:
+    """'Ashish Vaswani' -> 'Vaswani, Ashish' — the bibtex surname-first form."""
+    parts = display.split()
+    return f"{parts[-1]}, {' '.join(parts[:-1])}" if len(parts) > 1 else display
+
+
 def make_key(entry: BibEntry) -> str:
     surname = entry.fields.get("author", "").split(",")[0].strip().lower()
     year = entry.fields.get("year", "")

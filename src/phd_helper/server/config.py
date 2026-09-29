@@ -42,8 +42,9 @@ class Config:
     # SPEC §8 heartbeat cadence.
     ping_interval_s: float = 2.0
     lease_timeout_s: float = 60.0
-    # SPEC §6 Crossref polite pool (gitignored env, never committed).
+    # SPEC §6 polite pools (gitignored env, never committed).
     crossref_mailto: str = os.environ.get("PHD_CROSSREF_MAILTO", "")
+    openalex_mailto: str = os.environ.get("PHD_OPENALEX_MAILTO", "")
 
     def sampling(self, thinking: bool) -> dict:
         return THINKING_SAMPLING if thinking else PLAIN_SAMPLING
