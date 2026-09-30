@@ -10,6 +10,7 @@ import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -18,7 +19,8 @@ from fastapi.staticfiles import StaticFiles
 
 from phd_helper.cascade import ArxivRateLimited
 from phd_helper.context import (ContextInputs, PinnedSource, Turn,
-                                approx_tokens, assemble_context)
+                                approx_tokens, assemble_context,
+                                group_exchanges)
 from phd_helper.corpus import Corpus, CorpusError
 from phd_helper.endpoint import VoiceEndpoint
 from phd_helper.gists import body_sha, render_gists, stale_sections
@@ -28,6 +30,7 @@ from phd_helper.server.config import REPO_ROOT, load as load_config
 from phd_helper.server.http import HttpFetcher
 from phd_helper.server.llm import LlmClient, LlmError
 from phd_helper.server.voice import StubStt, StubTts, parse_control
+from phd_helper.summaries import by_section, render as render_summaries
 from phd_helper.tools import (OFFERED, TOOL_SCHEMAS, execute_async,
                               make_validators)
 
@@ -104,11 +107,12 @@ class Session:
             spawn_gist_refresh(self.state)
         # §4 paper memory: never drops, rides every turn once distilled.
         raw_memory = project.load_memory()
-        exchanges = _group_exchanges(self.history[1:])
+        exchanges = group_exchanges(self.history[1:])
         inputs = ContextInputs(
             section=section, skeleton=project.skeleton(),
             memory=f"Paper memory:\n{raw_memory}" if raw_memory else "",
-            distant_gists=distant_gists, rolling_summary="",
+            distant_gists=distant_gists,
+            rolling_summary=render_summaries(project.load_summaries()),
             turns=tuple(Turn("user", text) for text, _ in exchanges),
             pinned=pinned)
         ctx = assemble_context(
@@ -138,7 +142,10 @@ class Session:
         if (self.turn_task is not None and self.turn_task is not current
                 and not self.turn_task.done()):
             self.turn_task.cancel()
-        self.history.append({"role": "user", "content": user_text})
+        # The §7 rolling summaries group a sitting by the section each
+        # exchange was anchored to — tag the user message with it.
+        self.history.append({"role": "user", "content": user_text,
+                             "section": self.selected or ""})
         await self.send({"type": "turn_started"})
         project = self.state.project
         try:
@@ -351,20 +358,43 @@ async def distill_memory(state, conversation) -> None:
         state.project.save_memory(text)
 
 
-def _group_exchanges(messages: list[dict]) -> list[tuple[str, list[dict]]]:
-    """Partition the conversation log into exchanges: a user message opens
-    one, everything until the next user message belongs to it (assistant
-    tool-call turns and tool results included). Dropping conversation over
-    budget must never orphan a tool result from its tool_calls message."""
-    exchanges: list[tuple[str, list[dict]]] = []
-    for m in messages:
-        text = str(m.get("content") or "")
-        if m.get("role") == "user" or not exchanges:
-            exchanges.append((text, [m]))
-        else:
-            prev, msgs = exchanges[-1]
-            exchanges[-1] = (f"{prev}\n{text}", msgs + [m])
-    return exchanges
+SUMMARY_PROMPT = (
+    "Merge the existing rolling summary of this paper section with the "
+    "new session's conversation about it into one summary of at most 80 "
+    "words: what was written, decided and left open. Reply with the "
+    "summary text only.")
+SUMMARY_TRANSCRIPT_CAP = 8000  # chars of per-section transcript sent
+
+
+async def distill_summaries(state, conversation) -> None:
+    """§7: fold a finished sitting into per-section rolling summaries —
+    the residue of conversation that fell out of the verbatim window.
+    Sections discussed with nothing selected are nobody's summary; a
+    fault stops the pass, the next session end retries (§8)."""
+    groups = by_section(conversation)
+    if not groups:
+        return
+    summaries = state.project.load_summaries()
+    for section, lines in groups.items():
+        entries = summaries.get(section, [])
+        old = entries[-1]["text"] if entries else "(none yet)"
+        try:
+            _, _, text = await state.llm.chat(
+                [{"role": "system", "content": SUMMARY_PROMPT},
+                 {"role": "user",
+                  "content": f"Section: {section}\n"
+                             f"Existing summary:\n{old}\n\n"
+                             f"This session:\n{lines[:SUMMARY_TRANSCRIPT_CAP]}"}],
+                thinking=False, max_tokens=300)
+        except Exception:
+            return  # keep what landed; retry the rest next session end
+        text = (text or "").strip()
+        if text:
+            summaries.setdefault(section, []).append(
+                {"date": date.today().isoformat(), "text": text})
+            state.project.save_summaries(summaries)
+
+
 
 
 async def _doc_info(store, doc_id: str):
@@ -532,9 +562,12 @@ def create_app(state: "AppState | None" = None) -> FastAPI:
             session.cancel_turn()
             session.ws = None
             # §7: the sitting ends here until the web shell owns session
-            # semantics (project switch, 30-min idle) — distill memory in
-            # the background; a tab refresh just folds a shorter sitting.
-            spawn(state, distill_memory(state, session.history[1:]))
+            # semantics (project switch, 30-min idle) — distill memory
+            # and per-section rolling summaries in the background; a tab
+            # refresh just folds a shorter sitting.
+            sitting = session.history[1:]
+            spawn(state, distill_memory(state, sitting))
+            spawn(state, distill_summaries(state, sitting))
 
     async def dispatch(session: Session, msg: dict):
         now = time.monotonic()

@@ -43,6 +43,22 @@ class Context:
     conversation_kept: int = 0
 
 
+def group_exchanges(messages: list[dict]) -> list[tuple[str, list[dict]]]:
+    """Partition the conversation log into exchanges: a user message opens
+    one, everything until the next user message belongs to it (assistant
+    tool-call turns and tool results included). Dropping conversation over
+    budget must never orphan a tool result from its tool_calls message."""
+    exchanges: list[tuple[str, list[dict]]] = []
+    for m in messages:
+        text = str(m.get("content") or "")
+        if m.get("role") == "user" or not exchanges:
+            exchanges.append((text, [m]))
+        else:
+            prev, msgs = exchanges[-1]
+            exchanges[-1] = (f"{prev}\n{text}", msgs + [m])
+    return exchanges
+
+
 def approx_tokens(text: str) -> int:
     """Server-side token estimate: ~4 chars/token, no tokenizer dep. The
     budget is an estimate by nature (window-agnostic priority, §4); this

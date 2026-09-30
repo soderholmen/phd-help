@@ -484,3 +484,67 @@ async def test_disconnect_distills_the_sitting(tmp_path):
     await asyncio.gather(*state.ingest_tasks)  # the distill task
     # RecordingLlm answers "ok" — that became the distilled memory.
     assert state.project.load_memory() == "ok"
+
+
+# -- rolling summaries wiring (SPEC §4/§7) -----------------------------------
+
+
+@pytest.mark.anyio
+async def test_distill_summaries_folds_the_sitting_per_section(tmp_path):
+    from phd_helper.server.app import distill_summaries
+    llm = MemoryLlm()
+    state = gist_env(tmp_path, llm)
+    await distill_summaries(state, [
+        {"role": "user", "content": "tighten the hook",
+         "section": "sections/intro.tex"},
+        {"role": "assistant", "content": "did"}])
+    summaries = state.project.load_summaries()
+    entry = summaries["sections/intro.tex"][-1]
+    assert entry["text"] == "# Decisions\n- harrier for embeddings"
+    assert entry["date"]  # the dated session divider
+    assert "tighten the hook" in llm.prompts[0]
+
+
+@pytest.mark.anyio
+async def test_distill_summaries_skips_unanchored_and_faults(tmp_path):
+    from phd_helper.server.app import distill_summaries
+    state = gist_env(tmp_path, MemoryLlm())
+    await distill_summaries(state, [{"role": "user", "content": "hi",
+                                      "section": ""}])
+    assert state.project.load_summaries() == {}
+    state2 = gist_env(tmp_path / "b", GistLlm(fail_after=0))
+    await distill_summaries(state2, [{"role": "user", "content": "hi",
+                                       "section": "sections/intro.tex"}])
+    assert state2.project.load_summaries() == {}  # fault: skip, no raise
+
+
+@pytest.mark.anyio
+async def test_rolling_summaries_ride_the_context(tmp_path):
+    state, session = make_env(tmp_path, store=DocStore())
+    state.project.save_summaries({"sections/intro.tex": [
+        {"date": "2026-09-29", "text": "hook was rewritten twice"}]})
+    await session.run_turn("hello")
+    assert "hook was rewritten twice" in sent_text(session)
+
+
+@pytest.mark.anyio
+async def test_disconnect_distills_summaries_too(tmp_path):
+    import asyncio
+    state, _ = make_env(tmp_path)
+    state.endpoint = VoiceEndpoint(ping_interval=2.0, lease_timeout=60.0)
+    state.stt = StubStt()
+    state.http = FakeHttp()
+    state.ingestor = None
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "select_section",
+                          "section": "sections/intro.tex"})
+            ws.receive_json()
+            ws.send_json({"type": "typed", "text": "tighten it"})
+            assert ws.receive_json()["type"] == "turn_started"
+    await asyncio.gather(*state.ingest_tasks)
+    # RecordingLlm answers "ok"; the exchange was anchored, so intro
+    # got a dated summary entry.
+    assert state.project.load_summaries()["sections/intro.tex"][-1]["text"] \
+        == "ok"

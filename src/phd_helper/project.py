@@ -59,6 +59,24 @@ class Project:
     def read_section(self, path: str) -> str:
         return (self.root / path).read_text(encoding="utf-8")
 
+    # -- rolling summaries (SPEC §7) ------------------------------------------
+
+    def load_summaries(self) -> dict:
+        """{path: [{"date":…, "text":…}, …]}; dated session dividers."""
+        try:
+            return json.loads(
+                (self.state_dir / "summaries.json").read_text(
+                    encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def save_summaries(self, summaries: dict) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        tmp = self.state_dir / "summaries.json.tmp"
+        tmp.write_text(json.dumps(summaries, ensure_ascii=False),
+                       encoding="utf-8")
+        tmp.replace(self.state_dir / "summaries.json")
+
     # -- paper memory (SPEC §4) ---------------------------------------------
 
     def load_memory(self) -> str:
