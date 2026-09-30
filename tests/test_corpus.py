@@ -53,6 +53,23 @@ def test_new_arxiv_version_supersedes_the_old_record(corpus):
     assert corpus.pinned_ids("my-paper") == {new.doc_id}  # pins carry over
 
 
+def test_versioned_arxiv_ids_supersede_instead_of_duplicating(corpus):
+    # 2301.00001v1 then v2 is one paper with a new version (§6), not two
+    # papers: exact-id comparison used to let the version suffix through.
+    old = add(corpus, arxiv="2301.00001v1")
+    new = add(corpus, body=b"pdf bytes v2", arxiv="2301.00001v2")
+    assert new.supersedes == old.doc_id
+    assert corpus.list() == [new]
+
+
+def test_find_arxiv_ignores_version_and_prefix(corpus):
+    rec = add(corpus, arxiv="2301.00001v1")
+    assert corpus.find_arxiv("2301.00001").doc_id == rec.doc_id
+    assert corpus.find_arxiv("2301.00001v2").doc_id == rec.doc_id
+    assert corpus.find_arxiv("arXiv:2301.00001v3").doc_id == rec.doc_id
+    assert corpus.find_arxiv("") is None
+
+
 def test_supersede_matches_on_doi_too(corpus):
     old = add(corpus, arxiv="", doi="10.1000/x")
     new = add(corpus, body=b"other bytes", arxiv="", doi="10.1000/x")

@@ -130,9 +130,16 @@ def same_paper(a: BibEntry, b: BibEntry) -> bool:
     return bool(adoi and bdoi and adoi == bdoi)
 
 
+def normalize_arxiv(raw: str) -> str:
+    """Version-insensitive arXiv id: 'arXiv:2301.00001v2' -> '2301.00001'.
+    Shared by the cite loop's key reuse and the corpus registry's owned-
+    paper lookup, so a versioned id can't slip past either dedup (§6)."""
+    return re.sub(r"v\d+$", "", raw.strip().lower().removeprefix("arxiv:"))
+
+
 def _arxiv_id(entry: BibEntry) -> str:
     raw = (entry.fields.get("arxiv") or entry.fields.get("eprint") or "")
-    return re.sub(r"v\d+$", "", raw.strip().lower().removeprefix("arxiv:"))
+    return normalize_arxiv(raw)
 
 
 def invert_name(display: str) -> str:

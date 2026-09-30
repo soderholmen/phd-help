@@ -20,6 +20,8 @@ import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from phd_helper.bibtex import normalize_arxiv
+
 STATUSES = ("queued", "extracting", "indexed", "failed")
 _LEGAL = {
     "queued": {"extracting"},
@@ -95,7 +97,11 @@ class Corpus:
         dup = next((d for d in docs if d.sha256 == sha), None)
         if dup is not None:
             return dup, False
-        owned = next((d for d in docs if (arxiv and d.arxiv == arxiv) or
+        # Version-insensitive: 2301.00001v2 is a new version of an owned
+        # 2301.00001v1, not a second paper (§6 supersede, not duplicate).
+        key = normalize_arxiv(arxiv)
+        owned = next((d for d in docs if (key and
+                                          normalize_arxiv(d.arxiv) == key) or
                       (doi and d.doi == doi)), None)
         rec = DocRecord(
             doc_id=sha[:16], sha256=sha, title=title, arxiv=arxiv, doi=doi,
@@ -186,9 +192,11 @@ class Corpus:
         """Owned-paper lookup for door 2: auto-join must not re-download
         what the corpus already has (§6's 1-req/3-s budget is for new
         papers; an explicit re-fetch still goes through upload/retry)."""
-        if not arxiv_id:
+        key = normalize_arxiv(arxiv_id)
+        if not key:
             return None
-        return next((d for d in self._load() if d.arxiv == arxiv_id), None)
+        return next((d for d in self._load()
+                     if normalize_arxiv(d.arxiv) == key), None)
 
     # -- internals ----------------------------------------------------------
 
