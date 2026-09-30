@@ -7,7 +7,7 @@ import type { UploadMeta } from "../api/corpus";
 
 interface Props {
   docs: CorpusDoc[];
-  onUpload: (bytes: ArrayBuffer, meta: UploadMeta) => void;
+  onUpload: (bytes: ArrayBuffer, meta: UploadMeta) => Promise<unknown>;
   onRetry: (docId: string) => void;
   onPin: (docId: string) => void;
   onUnpin: (docId: string) => void;
@@ -17,13 +17,25 @@ export function CorpusPanel({ docs, onUpload, onRetry, onPin, onUnpin }: Props) 
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("");
   const [arxiv, setArxiv] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
 
+  // The selection clears only once the door accepts — a failed upload
+  // keeps the user's pick and shows why (the harness did this).
   const submit = async () => {
     if (!file) return;
-    onUpload(await file.arrayBuffer(), { title, arxiv });
-    setFile(null);
-    setTitle("");
-    setArxiv("");
+    setBusy(true);
+    setError("");
+    try {
+      await onUpload(await file.arrayBuffer(), { title: title.trim(), arxiv: arxiv.trim() });
+      setFile(null);
+      setTitle("");
+      setArxiv("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "upload failed");
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -54,10 +66,11 @@ export function CorpusPanel({ docs, onUpload, onRetry, onPin, onUnpin }: Props) 
           value={arxiv}
           onChange={(e) => setArxiv(e.target.value)}
         />
-        <button type="submit" disabled={!file}>
-          Upload
+        <button type="submit" disabled={!file || busy}>
+          {busy ? "Uploading…" : "Upload"}
         </button>
       </form>
+      {error && <div className="err">{error}</div>}
       <ul>
         {docs.length === 0 && <li className="empty">no papers yet</li>}
         {docs.map((d) => (

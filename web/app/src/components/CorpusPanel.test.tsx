@@ -19,7 +19,7 @@ const doc = (over: Partial<CorpusDoc>): CorpusDoc => ({
 });
 
 const noop = {
-  onUpload: () => {},
+  onUpload: async () => {},
   onRetry: () => {},
   onPin: () => {},
   onUnpin: () => {},
@@ -80,5 +80,21 @@ describe("CorpusPanel", () => {
   it("the upload button waits for a file", () => {
     render(<CorpusPanel docs={[]} {...noop} />);
     expect(screen.getByRole("button", { name: "Upload" })).toBeDisabled();
+  });
+
+  it("a failed upload keeps the pick and shows why (§8)", async () => {
+    const onUpload = vi.fn().mockRejectedValue(new Error("413: too large"));
+    render(<CorpusPanel docs={[]} {...noop} onUpload={onUpload} />);
+    const file = new File([new Uint8Array([1])], "big.pdf", {
+      type: "application/pdf",
+    });
+    const input = screen.getByLabelText("PDF file");
+    fireEvent.change(input, { target: { files: [file] } });
+    fireEvent.click(screen.getByRole("button", { name: "Upload" }));
+    expect(await screen.findByText("413: too large")).toBeInTheDocument();
+    // The selection survives: the same input still holds the file, so
+    // the retry is one click, not a re-pick.
+    expect((input as HTMLInputElement).files?.[0]).toBe(file);
+    expect(screen.getByRole("button", { name: "Upload" })).toBeEnabled();
   });
 });

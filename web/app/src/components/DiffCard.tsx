@@ -1,6 +1,7 @@
 // A pending anchored patch (§5): raw find/replace — diffs are never
 // rendered, approving a render artifact is the failure mode. Approval
 // is on-screen; voice may initiate, never confirm (§3).
+import { useState } from "react";
 import type { DiffCard as DiffCardData } from "../protocol/types";
 
 interface Props {
@@ -10,6 +11,9 @@ interface Props {
 }
 
 export function DiffCard({ card, onApprove, onReject }: Props) {
+  // One decision per card: a double-click's second frame would hit an
+  // already-consumed pending diff and bounce a confusing notice.
+  const [decided, setDecided] = useState(false);
   return (
     <li className="diff" data-diff-id={card.diff_id}>
       <header>
@@ -22,8 +26,24 @@ export function DiffCard({ card, onApprove, onReject }: Props) {
         <ins>{card.replace}</ins>
       </pre>
       <div className="acts">
-        <button onClick={() => onApprove(card)}>Apply</button>
-        <button onClick={() => onReject(card)}>Discard</button>
+        <button
+          disabled={decided}
+          onClick={() => {
+            setDecided(true);
+            onApprove(card);
+          }}
+        >
+          Apply
+        </button>
+        <button
+          disabled={decided}
+          onClick={() => {
+            setDecided(true);
+            onReject(card);
+          }}
+        >
+          Discard
+        </button>
       </div>
     </li>
   );

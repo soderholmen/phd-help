@@ -1,8 +1,10 @@
 // One WebSocket per tab (SPEC §1), thin over the reducer: connect with
-// reconnect (connection blips resume mid-conversation, §8), parse
-// server events into dispatch, and carry the 2 s heartbeat that feeds
-// liveness, the meter and the lease watchdog (§8).
+// reconnect, parse server events into dispatch, and carry the 2 s
+// heartbeat that feeds liveness, the meter and the lease watchdog (§8).
+// A blip starts a fresh server Session — the reducer's connection_closed
+// fold says so; mid-conversation resume is the §7 slice.
 import { useEffect, useRef } from "react";
+import { heartbeat } from "../protocol/frames";
 import type { ControlFrame, ServerEvent, ShellEvent } from "../types";
 
 export interface Connection {
@@ -38,8 +40,12 @@ export function useConnection(
       const proto = location.protocol === "https:" ? "wss" : "ws";
       ws = new WebSocket(`${proto}://${location.host}/ws/voice?client=${clientId()}`);
       ws.binaryType = "arraybuffer";
+      wsRef.current = ws;
       ws.onopen = () => dispatchRef.current({ type: "connection_opened" });
       ws.onclose = () => {
+        // A discarded socket's close (StrictMode double-mount, a
+        // superseded retry) must not mark the live one closed.
+        if (wsRef.current !== ws) return;
         dispatchRef.current({ type: "connection_closed" });
         if (!closedByUs) retryTimer = window.setTimeout(connect, 2000);
       };
@@ -48,20 +54,19 @@ export function useConnection(
           dispatchRef.current(JSON.parse(ev.data) as ServerEvent);
         }
       };
-      wsRef.current = ws;
     };
     connect();
 
-    const heartbeat = window.setInterval(() => {
+    const hb = window.setInterval(() => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: "heartbeat", rms: rmsRef.current() }));
+        wsRef.current.send(JSON.stringify(heartbeat(rmsRef.current())));
       }
     }, 2000);
 
     return () => {
       closedByUs = true;
       window.clearTimeout(retryTimer);
-      window.clearInterval(heartbeat);
+      window.clearInterval(hb);
       wsRef.current?.close();
     };
   }, []);
@@ -70,9 +75,18 @@ export function useConnection(
     send: (frame) => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify(frame));
+      } else {
+        // §8: never a silent drop — the user hears why it didn't go.
+        dispatchRef.current({
+          type: "error",
+          where: "connection",
+          message: "not connected — message not sent",
+        });
       }
     },
     sendAudio: (chunk) => {
+      // Live mic audio is transient: dropping chunks during a blip is
+      // the honest behavior, queueing stale PCM would be worse.
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(chunk);
       }

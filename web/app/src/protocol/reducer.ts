@@ -33,9 +33,23 @@ export function reducer(state: ShellState, event: ShellEvent): ShellState {
     case "connection_opened":
       return { ...state, connected: true };
     case "connection_closed":
-      // A dropped socket ends the turn and the arming optimistically;
-      // reconnect resumes (§8 connection blips are the server's story).
-      return { ...state, connected: false, turnActive: false, armed: false, rms: 0 };
+      // app.py builds a fresh Session per socket: the anchor and any
+      // pending approvals are gone server-side, so the client must stop
+      // claiming them. The transcript stays visible with a notice —
+      // mid-conversation resume is the §7 cross-session history slice.
+      return withMessage(
+        {
+          ...state,
+          connected: false,
+          turnActive: false,
+          armed: false,
+          rms: 0,
+          selected: null,
+          pendingDiffs: [],
+        },
+        "notice",
+        "Connection lost — the agent's context resets on reconnect",
+      );
     case "hello":
       return { ...state, clientId: event.client_id };
     case "user_send":

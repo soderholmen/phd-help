@@ -27,32 +27,31 @@ export default function App() {
   const [docs, setDocs] = useState<CorpusDoc[]>([]);
   const [health, setHealth] = useState<Health | null>(null);
 
-  // The tree changes only when the project does; health and corpus
-  // status poll — indexing is async and must be visible (§6).
-  useEffect(() => {
-    fetchTree().then(setTree).catch(() => setTree([]));
-  }, []);
+  // One 3 s poll for tree + health + corpus status: indexing is async
+  // and must be visible (§6), and the agent can restructure the paper
+  // (a new \input) so the tree is not fetch-once. A backgrounded tab
+  // stays quiet and catches up on focus (§3's visibility discipline);
+  // the three doors are independent, so they fan out.
   useEffect(() => {
     let stop = false;
     const tick = async () => {
-      try {
-        const h = await fetchHealth();
-        if (!stop) setHealth(h);
-      } catch {
-        if (!stop) setHealth(null);
-      }
-      try {
-        const d = await listDocs();
-        if (!stop) setDocs(d);
-      } catch {
-        /* tray stays as-is; the next tick retries */
-      }
+      const [t, h, d] = await Promise.allSettled([fetchTree(), fetchHealth(), listDocs()]);
+      if (stop) return;
+      if (t.status === "fulfilled") setTree(t.value);
+      if (h.status === "fulfilled") setHealth(h.value);
+      else setHealth(null);
+      if (d.status === "fulfilled") setDocs(d.value);
     };
-    void tick();
-    const timer = window.setInterval(() => void tick(), 3000);
+    const go = () => {
+      if (!document.hidden) void tick();
+    };
+    go();
+    const timer = window.setInterval(go, 3000);
+    document.addEventListener("visibilitychange", go);
     return () => {
       stop = true;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", go);
     };
   }, []);
 
@@ -124,7 +123,7 @@ export default function App() {
         <aside className="right">
           <CorpusPanel
             docs={docs}
-            onUpload={(bytes, meta: UploadMeta) => void uploadPdf(bytes, meta).catch(() => {})}
+            onUpload={(bytes, meta: UploadMeta) => uploadPdf(bytes, meta)}
             onRetry={(id) => void retry(id).catch(() => {})}
             onPin={(id) => void pin(id).catch(() => {})}
             onUnpin={(id) => void unpin(id).catch(() => {})}

@@ -19,6 +19,31 @@ describe("connection", () => {
     );
     expect(busy).toMatchObject({ connected: false, turnActive: false, armed: false, rms: 0 });
   });
+
+  it("close drops the anchor and pending diffs — the server's Session is fresh per socket", () => {
+    const s = fold(
+      { type: "section_selected", section: "sections/intro.tex" },
+      {
+        type: "diff",
+        diff_id: "d1",
+        section: "sections/intro.tex",
+        find: "a",
+        replace: "b",
+      },
+      { type: "connection_closed" },
+    );
+    // app.py builds a new Session per WS connect: selected=None, no
+    // pending diffs re-presented yet (§7 slice). Keeping them client-
+    // side would claim an anchor and an approval the server doesn't have.
+    expect(s.selected).toBeNull();
+    expect(s.pendingDiffs).toEqual([]);
+    // The visible transcript stays (the user's record), but a notice
+    // says the agent's own context reset — until §7 resume lands.
+    expect(s.messages.at(-1)).toMatchObject({
+      role: "notice",
+      text: "Connection lost — the agent's context resets on reconnect",
+    });
+  });
 });
 
 describe("turn taking", () => {

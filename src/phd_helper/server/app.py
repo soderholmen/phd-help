@@ -23,7 +23,7 @@ from phd_helper.context import (ContextInputs, PinnedSource, Turn,
                                 group_exchanges)
 from phd_helper.corpus import Corpus, CorpusError
 from phd_helper.endpoint import VoiceEndpoint
-from phd_helper.gists import body_sha, render_gists, stale_sections
+from phd_helper.gists import body_sha, flatten, render_gists, stale_sections
 from phd_helper.ingest import IngestError, Ingestor
 from phd_helper.project import Project
 from phd_helper.server.config import REPO_ROOT, load as load_config
@@ -51,15 +51,6 @@ SYSTEM_PROMPT = (
     "strings.\n")
 
 
-def flatten_tree(nodes):
-    """All tree paths, depth-first. The tree is clickable at every
-    depth (§1), so the known-set and the prompt's section list flatten
-    rather than stopping at the top level."""
-    for n in nodes:
-        yield n.path
-        yield from flatten_tree(n.children)
-
-
 class Session:
     """One browser tab's voice connection (§1: one WebSocket per tab)."""
 
@@ -71,7 +62,9 @@ class Session:
         # §1: clicking a tree node anchors the section-scoped discussion;
         # the anchored section's body then rides every turn's context (§4).
         self.selected: str | None = None
-        sections = ", ".join(flatten_tree(app_state.project.section_tree()))
+        # The tree is clickable at every depth (§1), so the prompt's
+        # section list flattens rather than stopping at the top level.
+        sections = ", ".join(flatten(app_state.project.section_tree()))
         self.history: list[dict] = [{"role": "system", "content":
                                      SYSTEM_PROMPT +
                                      f"\nProject sections: {sections}"}]
@@ -80,7 +73,7 @@ class Session:
         if not path:
             self.selected = None  # deselect: the anchor must be clearable
             return True
-        known = set(flatten_tree(self.state.project.section_tree()))
+        known = set(flatten(self.state.project.section_tree()))
         if path not in known:
             return False
         self.selected = path

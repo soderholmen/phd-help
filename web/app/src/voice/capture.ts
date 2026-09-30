@@ -6,24 +6,33 @@ export class MicCapture {
   rms = 0;
   onChunk: ((pcm: ArrayBuffer) => void) | null = null;
 
-  /** Lazy one-time setup (needs the user gesture), then resume. */
+  /** Lazy one-time setup (needs the user gesture), then resume. The
+   *  context is only kept if the whole setup succeeds — a denied mic
+   *  or a failed worklet load must leave no half-built state behind,
+   *  or every later toggle would "succeed" with no audio ever flowing. */
   async start(): Promise<void> {
     if (!this.ctx) {
-      this.ctx = new AudioContext();
-      await this.ctx.audioWorklet.addModule("/capture.js");
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false },
-      });
-      const src = this.ctx.createMediaStreamSource(stream);
-      const node = new AudioWorkletNode(this.ctx, "capture");
-      node.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
-        this.onChunk?.(ev.data);
-        const view = new Int16Array(ev.data);
-        let sum = 0;
-        for (let i = 0; i < view.length; i += 8) sum += view[i] * view[i];
-        this.rms = Math.sqrt(sum / (view.length / 8)) / 0x7fff; // meter feed
-      };
-      src.connect(node);
+      const ctx = new AudioContext();
+      try {
+        await ctx.audioWorklet.addModule("/capture.js");
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false },
+        });
+        const src = ctx.createMediaStreamSource(stream);
+        const node = new AudioWorkletNode(ctx, "capture");
+        node.port.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
+          this.onChunk?.(ev.data);
+          const view = new Int16Array(ev.data);
+          let sum = 0;
+          for (let i = 0; i < view.length; i += 8) sum += view[i] * view[i];
+          this.rms = Math.sqrt(sum / (view.length / 8)) / 0x7fff; // meter feed
+        };
+        src.connect(node);
+      } catch (e) {
+        void ctx.close();
+        throw e;
+      }
+      this.ctx = ctx;
     }
     await this.ctx.resume();
   }
