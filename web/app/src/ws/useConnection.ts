@@ -1,0 +1,81 @@
+// One WebSocket per tab (SPEC §1), thin over the reducer: connect with
+// reconnect (connection blips resume mid-conversation, §8), parse
+// server events into dispatch, and carry the 2 s heartbeat that feeds
+// liveness, the meter and the lease watchdog (§8).
+import { useEffect, useRef } from "react";
+import type { ControlFrame, ServerEvent, ShellEvent } from "../types";
+
+export interface Connection {
+  send: (frame: ControlFrame) => void;
+  sendAudio: (chunk: ArrayBuffer) => void;
+}
+
+function clientId(): string {
+  let id = sessionStorage.getItem("phd-client");
+  if (!id) {
+    id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    sessionStorage.setItem("phd-client", id);
+  }
+  return id;
+}
+
+export function useConnection(
+  dispatch: (event: ShellEvent) => void,
+  getRms: () => number,
+): Connection {
+  const wsRef = useRef<WebSocket | null>(null);
+  const dispatchRef = useRef(dispatch);
+  dispatchRef.current = dispatch;
+  const rmsRef = useRef(getRms);
+  rmsRef.current = getRms;
+
+  useEffect(() => {
+    let ws: WebSocket;
+    let closedByUs = false;
+    let retryTimer: number | undefined;
+
+    const connect = () => {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      ws = new WebSocket(`${proto}://${location.host}/ws/voice?client=${clientId()}`);
+      ws.binaryType = "arraybuffer";
+      ws.onopen = () => dispatchRef.current({ type: "connection_opened" });
+      ws.onclose = () => {
+        dispatchRef.current({ type: "connection_closed" });
+        if (!closedByUs) retryTimer = window.setTimeout(connect, 2000);
+      };
+      ws.onmessage = (ev) => {
+        if (typeof ev.data === "string") {
+          dispatchRef.current(JSON.parse(ev.data) as ServerEvent);
+        }
+      };
+      wsRef.current = ws;
+    };
+    connect();
+
+    const heartbeat = window.setInterval(() => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: "heartbeat", rms: rmsRef.current() }));
+      }
+    }, 2000);
+
+    return () => {
+      closedByUs = true;
+      window.clearTimeout(retryTimer);
+      window.clearInterval(heartbeat);
+      wsRef.current?.close();
+    };
+  }, []);
+
+  return {
+    send: (frame) => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify(frame));
+      }
+    },
+    sendAudio: (chunk) => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(chunk);
+      }
+    },
+  };
+}

@@ -20,5 +20,6 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: "./vitest.setup.ts",
+    globals: true, // RTL auto-cleanup registers against the global afterEach
   },
 });

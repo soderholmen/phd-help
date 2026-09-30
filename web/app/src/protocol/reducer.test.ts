@@ -13,7 +13,6 @@ describe("connection", () => {
     expect(open).toMatchObject({ connected: true, clientId: "c1" });
     const busy = fold(
       { type: "connection_opened" },
-      { type: "arm" },
       { type: "armed", ok: true, holder: "c1" },
       { type: "turn_started" },
       { type: "connection_closed" },

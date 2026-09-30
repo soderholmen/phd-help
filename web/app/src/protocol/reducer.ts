@@ -1,7 +1,8 @@
 // The shell's deterministic core: every WS event and local action folds
 // into state here, as a pure function. The WS hook and components stay
 // thin because all the turn-taking, diff and anchor logic lives here.
-import type { DiffCard, Message, ShellEvent, ShellState } from "./types";
+import type { ShellEvent } from "../types";
+import type { DiffCard, Message, ShellState } from "./types";
 
 export const initialState: ShellState = {
   connected: false,
