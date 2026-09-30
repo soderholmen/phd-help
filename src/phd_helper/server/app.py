@@ -362,10 +362,14 @@ def create_app(state: "AppState | None" = None) -> FastAPI:
     @app.get("/corpus/docs")
     async def corpus_docs():
         # Per-PDF status so failures are visible, not rot (§6).
+        # pinned_here is the server-side join with the active project —
+        # the UI's pin button can't know the project name itself (issue #21).
+        here = state.project.root.name
         return [{"doc_id": d.doc_id, "title": d.title, "status": d.status,
                  "error": d.error, "arxiv": d.arxiv, "doi": d.doi,
                  "year": d.year, "source": d.source,
                  "pinned_in": list(d.pinned_in),
+                 "pinned_here": here in d.pinned_in,
                  "chunk_count": d.chunk_count}
                 for d in state.corpus.list()]
 

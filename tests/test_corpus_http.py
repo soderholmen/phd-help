@@ -103,7 +103,9 @@ def test_paused_pipeline_leaves_docs_queued(tmp_path):
     state = SimpleNamespace(http=FakeHttp(), corpus=corpus,
                             corpus_store=None,
                             ingestor=Ingestor(corpus, None, None),
-                            ingest_tasks=set())
+                            ingest_tasks=set(),
+                            project=SimpleNamespace(
+                                root=tmp_path / "my-paper"))
     with TestClient(create_app(state=state)) as client:
         body = client.post("/corpus/upload", content=b"x").json()
         settle(client, body["doc_id"], want="queued", tries=5)
@@ -143,6 +145,19 @@ def test_pin_unknown_doc_is_a_409(tmp_path):
     _, client = make_env(tmp_path)
     with client:
         assert client.post("/corpus/nosuchdoc/pin").status_code == 409
+
+
+def test_docs_mark_pins_of_the_active_project(tmp_path):
+    # The UI's pin button must reflect the ACTIVE project, and only the
+    # server knows its name — pinned_here is the server-side join the
+    # corpus surface renders against (issue #21).
+    _, client = make_env(tmp_path)
+    with client:
+        doc_id = client.post("/corpus/upload", content=b"x").json()["doc_id"]
+        settle(client, doc_id)
+        assert client.get("/corpus/docs").json()[0]["pinned_here"] is False
+        client.post(f"/corpus/{doc_id}/pin")
+        assert client.get("/corpus/docs").json()[0]["pinned_here"] is True
 
 
 def test_retry_only_for_failed_docs(tmp_path):
