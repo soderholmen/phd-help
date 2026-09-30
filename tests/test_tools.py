@@ -312,7 +312,7 @@ async def test_corpus_search_returns_ranked_chunks_with_locators(paper, corpus):
     assert hit["doc_id"] == rec.doc_id
     assert hit["title"] == "Parakeet"  # registry join, not stored per chunk
     assert hit["section"] == "Method"
-    assert hit["locator"] == "p.3, blocks 12-12"
+    assert hit["locator"] == "p.3, block 12"  # single block, no degenerate range
     assert "corpus_doc" in result["note"]  # the chain the model should take
 
 

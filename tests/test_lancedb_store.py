@@ -15,6 +15,27 @@ import pytest
 
 from phd_helper.chunking import Chunk
 from phd_helper.server.lancedb_store import LanceStore
+from phd_helper.store import ChunkHit
+
+
+def _hit(page_start, page_end, block_start, block_end):
+    return ChunkHit(doc_id="d", text="t", section_path="",
+                    page_start=page_start, page_end=page_end,
+                    block_start=block_start, block_end=block_end,
+                    kind="text", score=0.5)
+
+
+def test_locator_single_block_and_range():
+    assert _hit(3, 3, 1, 1).locator == "p.3, block 1"
+    assert _hit(4, 4, 43, 47).locator == "p.4, blocks 43-47"
+
+
+def test_locator_names_both_pages_when_the_chunk_spans_one():
+    # Block ids are page-local (§6: stable against the PDF), so a
+    # paragraph flowing across a page break must not read "blocks 40-1"
+    # — each end carries its own page.
+    assert (_hit(2, 3, 40, 1).locator
+            == "p.2, block 40 → p.3, block 1")
 
 
 @pytest.fixture

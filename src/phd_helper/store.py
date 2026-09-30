@@ -28,10 +28,16 @@ class ChunkHit:
 
     @property
     def locator(self) -> str:
-        """The §6 citation locator ("p.4, blocks 43-47")."""
-        pages = (f"p.{self.page_start}" if self.page_start == self.page_end
-                 else f"pp.{self.page_start}-{self.page_end}")
-        return f"{pages}, blocks {self.block_start}-{self.block_end}"
+        """The §6 citation locator ("p.4, blocks 43-47"). Block ids
+        are page-local (stable against the PDF, not one extraction), so
+        a chunk flowing across a page break names both ends."""
+        if self.page_start != self.page_end:
+            return (f"p.{self.page_start}, block {self.block_start} → "
+                    f"p.{self.page_end}, block {self.block_end}")
+        if self.block_start == self.block_end:
+            return f"p.{self.page_start}, block {self.block_start}"
+        return (f"p.{self.page_start}, blocks "
+                f"{self.block_start}-{self.block_end}")
 
 
 @dataclass(frozen=True)

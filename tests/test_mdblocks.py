@@ -5,6 +5,8 @@ vocabulary the chunker already speaks — the adapter half (subprocess)
 stays thin.
 """
 
+import pytest
+
 from phd_helper.mdblocks import markdown_to_blocks
 
 DOC = """<!-- page 1 of 15 -->
@@ -39,9 +41,16 @@ def test_headings_carry_levels():
     assert all(b.kind == "heading" for b in heads)
 
 
-def test_block_ids_are_sequential_across_kinds():
+def test_block_ids_are_page_local_and_reset_per_page():
+    # §6: locators must be stable against the PDF, not against this
+    # exact extraction — a document-wide counter lets a reparse of
+    # page 2 shift every block id after it. Page-local ids (1-based,
+    # matching MinerU's own convention) keep the blast radius one page.
     blocks = markdown_to_blocks(DOC)
-    assert [b.block for b in blocks] == list(range(len(blocks)))
+    p1 = [b for b in blocks if b.page == 1]
+    p2 = [b for b in blocks if b.page == 2]
+    assert [b.block for b in p1] == [1, 2, 3, 4]
+    assert [b.block for b in p2] == [1]
 
 
 def test_multiline_paragraph_joins_into_one_block():
@@ -62,9 +71,44 @@ def test_figure_marker_becomes_figure_block():
     blocks = markdown_to_blocks(FIG)
     fig = [b for b in blocks if b.kind == "figure"]
     assert len(fig) == 1
-    assert fig[0].page == 3
     assert "Image block" in fig[0].text
     assert "doc:bdfaa68" not in fig[0].text  # locator noise stripped
+
+
+def test_figure_keeps_minerus_real_page_and_block_locator():
+    # The URL carries MinerU's real page:N/block:M — the PDF-stable
+    # locator §6:161 makes load-bearing. It must survive the parse,
+    # not be replaced by a synthesized id.
+    blocks = markdown_to_blocks(FIG)
+    fig = [b for b in blocks if b.kind == "figure"][0]
+    assert (fig.page, fig.block) == (3, 1)
+
+
+def test_figure_real_id_reserves_the_page_local_counter():
+    # No two blocks on a page may share an id: the counter skips past
+    # whatever real id the figure claimed.
+    md = ("<!-- page 5 of 9 -->\n\n"
+          "Intro text.\n\n"
+          "![Image block](doc:x/tier:standard/page:5/block:2)\n\n"
+          "Figure 2: A figure.\n\n"
+          "More text.\n")
+    blocks = markdown_to_blocks(md)
+    assert [(b.kind, b.block) for b in blocks] == [
+        ("text", 1), ("figure", 2), ("text", 3)]
+
+
+def test_figure_url_page_wins_over_the_marker():
+    # The URL is MinerU's authoritative locator for the asset.
+    md = ("<!-- page 3 of 9 -->\n\n"
+          "![Image block](doc:x/tier:standard/page:4/block:1)\n")
+    blocks = markdown_to_blocks(md)
+    assert (blocks[0].page, blocks[0].block) == (4, 1)
+
+
+def test_figure_without_a_locator_falls_back_to_page_and_counter():
+    md = ("<!-- page 2 of 9 -->\n\n![Image block](images/x.png)\n")
+    blocks = markdown_to_blocks(md)
+    assert (blocks[0].page, blocks[0].block) == (2, 1)
 
 
 def test_caption_merges_into_the_figure_chunk():
@@ -82,6 +126,31 @@ def test_caption_like_prose_stays_its_own_text_block():
           "Figure 1 shows that scaling works.\n")
     blocks = markdown_to_blocks(md)
     assert [b.kind for b in blocks] == ["figure", "text"]
+
+
+def test_caption_like_prose_with_a_comma_stays_separate():
+    md = ("<!-- page 1 of 1 -->\n\n"
+          "![Image block](doc:x/tier:standard/page:1/block:1)\n\n"
+          "Figure 1, which shows scaling, is famous.\n")
+    blocks = markdown_to_blocks(md)
+    assert [b.kind for b in blocks] == ["figure", "text"]
+
+
+@pytest.mark.parametrize("cap", [
+    "Fig. 1: A chart.",            # the abbreviation real papers use
+    "Figure 1. Caption.",          # period separator
+    "Figure 1(a): Detail.",        # subfigure label
+    "Figure 1 (a): Detail.",       # ... with a space
+    "TABLE 2. Results.",           # caps + period
+    "Algorithm 1: Procedure.",     # algorithm floats
+])
+def test_wider_caption_shapes_merge_into_the_figure(cap):
+    md = ("<!-- page 1 of 1 -->\n\n"
+          "![Image block](doc:x/tier:standard/page:1/block:1)\n\n"
+          f"{cap}\n")
+    blocks = markdown_to_blocks(md)
+    assert len(blocks) == 1, f"{cap!r} left a bare figure + separate prose"
+    assert cap in blocks[0].text
 
 
 EQ = """<!-- page 4 of 15 -->
