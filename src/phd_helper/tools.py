@@ -85,7 +85,7 @@ TOOL_SCHEMAS = [
                       "description": "Number of chunks to return, 1-20"},
                 "boost_pinned": {
                     "type": "boolean",
-                    "description": "Rank sources pinned to this section "
+                    "description": "Rank sources pinned to this project "
                                    "first"}},
             "required": ["query", "k", "boost_pinned"],
             "additionalProperties": False}}},
