@@ -25,6 +25,13 @@ class ChunkHit:
     kind: str
     score: float
 
+    @property
+    def locator(self) -> str:
+        """The §6 citation locator ("p.4, blocks 43-47")."""
+        pages = (f"p.{self.page_start}" if self.page_start == self.page_end
+                 else f"pp.{self.page_start}-{self.page_end}")
+        return f"{pages}, blocks {self.block_start}-{self.block_end}"
+
 
 @dataclass(frozen=True)
 class DocInfo:

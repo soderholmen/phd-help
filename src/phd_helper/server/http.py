@@ -17,25 +17,26 @@ class HttpFetcher:
             follow_redirects=True, timeout=httpx.Timeout(20.0, connect=10.0),
             headers={"Accept": "application/x-bibtex, application/json, */*"})
 
-    async def __call__(self, url: str, headers: dict | None = None) -> Response:
+    async def _get(self, url: str, headers: dict | None):
+        """One GET, one failure envelope: a dead connection is status 0
+        with the reason, never an exception — the turn bounces with a
+        reason instead of dying silently (SPEC §8 error matrix)."""
         try:
-            r = await self._http.get(url, headers=headers or {})
+            return await self._http.get(url, headers=headers or {}), None
         except httpx.HTTPError as e:
-            # A dead connection is a cascade miss (status 0), not an
-            # exception: the turn bounces with a reason instead of dying
-            # silently (SPEC §8 error matrix).
-            return Response(0, f"{type(e).__name__}: {e}")
-        return Response(r.status_code, r.text)
+            return None, f"{type(e).__name__}: {e}"
+
+    async def __call__(self, url: str, headers: dict | None = None) -> Response:
+        r, err = await self._get(url, headers)
+        return Response(0, err) if r is None else Response(r.status_code,
+                                                           r.text)
 
     async def fetch_bytes(self, url: str,
                           headers: dict | None = None) -> tuple[int, bytes]:
-        """Binary GET for corpus PDFs — r.text would corrupt them. Same
-        failure envelope: a dead connection is status 0, not an exception."""
-        try:
-            r = await self._http.get(url, headers=headers or {})
-        except httpx.HTTPError as e:
-            return 0, f"{type(e).__name__}: {e}".encode()
-        return r.status_code, r.content
+        """Binary GET for corpus PDFs — r.text would corrupt them."""
+        r, err = await self._get(url, headers)
+        return (0, err.encode()) if r is None else (r.status_code,
+                                                    r.content)
 
     async def aclose(self):
         await self._http.aclose()

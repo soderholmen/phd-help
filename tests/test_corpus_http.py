@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+from phd_helper.chunking import Block
 from phd_helper.corpus import Corpus
 from phd_helper.ingest import Ingestor
 from phd_helper.server.app import create_app
@@ -22,7 +23,6 @@ class FakeExtractor:
     async def extract(self, pdf):
         if self.fail:
             raise RuntimeError("MinerU died")
-        from phd_helper.chunking import Block
         return [Block("text", "body", page=1, block=0)]
 
 

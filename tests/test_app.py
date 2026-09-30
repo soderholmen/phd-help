@@ -44,7 +44,10 @@ async def test_unexpected_error_becomes_an_error_event_not_silence(tmp_path):
         "\\input{sections/intro}\n\\end{document}\n", encoding="utf-8")
     (tmp_path / "sections" / "intro.tex").write_text("Hi.\n", encoding="utf-8")
     state = SimpleNamespace(project=Project(tmp_path), llm=BoomLlm(),
-                            tts=None, config=None, fetch=None)
+                            tts=None, config=None, fetch=None,
+                            corpus=Corpus(tmp_path / "c"),
+                            corpus_store=None, crossref_mailto="",
+                            openalex_mailto="")
     session = Session(state, "c1")
     events = []
 

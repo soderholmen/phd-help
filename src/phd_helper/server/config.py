@@ -51,6 +51,13 @@ class Config:
     # stays prod, this only picks where the adapters live).
     corpus_stack: str = os.environ.get("PHD_CORPUS_STACK", "off")
 
+    def __post_init__(self):
+        # A typo'd stack must not silently degrade to "off" (§8: state is
+        # known at startup, not discovered mid-turn).
+        if self.corpus_stack not in ("off", "local"):
+            raise ValueError("PHD_CORPUS_STACK must be 'off' or 'local', "
+                             f"got {self.corpus_stack!r}")
+
     def sampling(self, thinking: bool) -> dict:
         return THINKING_SAMPLING if thinking else PLAIN_SAMPLING
 

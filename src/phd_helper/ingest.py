@@ -48,14 +48,25 @@ class Ingestor:
         rec = self.corpus.get(doc_id)
         if rec is None:
             return  # superseded mid-flight: nothing to write back to
-        self.corpus.set_status(doc_id, "extracting")
         try:
+            rec = self.corpus.set_status(doc_id, "extracting")
+        except CorpusError:
+            # A concurrent ingest (autojoin + drain, upload + autojoin of
+            # the same paper) already owns this doc; claiming it failed
+            # would poison the other ingest's record.
+            return
+        try:
+            if rec.supersedes:
+                # Retire the old version's chunks first: add_pdf already
+                # deleted its record, so leaving them until after this
+                # index would orphan them on a failed extract. Removing
+                # first keeps index and registry consistent either way —
+                # on failure the paper is simply absent, and retry works.
+                await self.store.remove(rec.supersedes)  # new version (§6)
             pdf = self.corpus.pdf_path(doc_id).read_bytes()
             blocks = await self.extractor.extract(pdf)
             chunks = chunk_document(rec.title or "Untitled", blocks)
             await self.store.index(doc_id, chunks)
-            if rec.supersedes:
-                await self.store.remove(rec.supersedes)  # new version (§6)
             self.corpus.mark_indexed(doc_id, chunk_count=len(chunks))
         except Exception as e:
             try:
@@ -75,6 +86,9 @@ class Ingestor:
         """Door 2 (agent fetch / search auto-join): fetch the PDF, then the
         shared pipeline. A dead or paywalled link raises — those papers
         get a bib entry only, never a half-registered corpus doc."""
+        owned = self.corpus.find_arxiv(arxiv_id)
+        if owned is not None:
+            return owned  # auto-join re-hit: no re-download (§6 budget)
         pdf = await self.fetch_pdf(f"https://arxiv.org/pdf/{arxiv_id}")
         rec, new = self.corpus.add_pdf(pdf, arxiv=arxiv_id, source="agent")
         if new:

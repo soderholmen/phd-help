@@ -125,13 +125,17 @@ class Corpus:
 
     # -- status machine -------------------------------------------------------
 
+    @staticmethod
+    def _require(rec: DocRecord, status: str) -> None:
+        if status not in _LEGAL.get(rec.status, set()):
+            raise CorpusError(
+                f"{rec.doc_id}: {rec.status} -> {status} is not a legal "
+                "transition")
+
     def set_status(self, doc_id: str, status: str, error: str = "") -> DocRecord:
         docs = self._load()
         rec = self._find(docs, doc_id)
-        if status not in _LEGAL.get(rec.status, set()):
-            raise CorpusError(
-                f"{doc_id}: {rec.status} -> {status} is not a legal "
-                "transition")
+        self._require(rec, status)
         updated = replace(rec, status=status, error=error)
         self._write(docs, updated)
         return updated
@@ -139,9 +143,7 @@ class Corpus:
     def mark_indexed(self, doc_id: str, chunk_count: int) -> DocRecord:
         docs = self._load()
         rec = self._find(docs, doc_id)
-        if "indexed" not in _LEGAL[rec.status]:
-            raise CorpusError(
-                f"{doc_id}: {rec.status} -> indexed is not a legal transition")
+        self._require(rec, "indexed")
         updated = replace(rec, status="indexed", error="",
                           indexed_at=time.time(), chunk_count=chunk_count)
         self._write(docs, updated)
@@ -179,6 +181,14 @@ class Corpus:
 
     def pinned_ids(self, project: str) -> set[str]:
         return {d.doc_id for d in self._load() if project in d.pinned_in}
+
+    def find_arxiv(self, arxiv_id: str) -> DocRecord | None:
+        """Owned-paper lookup for door 2: auto-join must not re-download
+        what the corpus already has (§6's 1-req/3-s budget is for new
+        papers; an explicit re-fetch still goes through upload/retry)."""
+        if not arxiv_id:
+            return None
+        return next((d for d in self._load() if d.arxiv == arxiv_id), None)
 
     # -- internals ----------------------------------------------------------
 

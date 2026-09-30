@@ -163,10 +163,10 @@ class AppState:
         self.fetch_pdf = ArxivRateLimited(self.http.fetch_bytes)
         self.ingestor = Ingestor(self.corpus, extractor=extractor,
                                  store=self.corpus_store,
-                                 fetch_pdf=self._fetch_pdf)
+                                 fetch_pdf=self._fetch_pdf_or_raise)
         self.ingest_tasks: set[asyncio.Task] = set()
 
-    async def _fetch_pdf(self, url: str) -> bytes:
+    async def _fetch_pdf_or_raise(self, url: str) -> bytes:
         status, body = await self.fetch_pdf(url)
         if status != 200 or not body:
             raise IngestError(f"PDF fetch failed ({status})")

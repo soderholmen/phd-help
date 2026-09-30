@@ -6,6 +6,7 @@ machine shows it, §8) and that temp files never leak.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -69,5 +70,4 @@ async def test_temp_pdf_is_cleaned_up_even_on_failure():
         return 0, envelope("<!-- page 1 of 1 -->\n\nHi.\n")
     ex = MinerUExtractor(cli="mineru-test", run=run)
     await ex.extract(b"%PDF fake")
-    from pathlib import Path
     assert not Path(seen["path"]).exists()

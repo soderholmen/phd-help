@@ -16,6 +16,10 @@ _PAGE = re.compile(r"<!--\s*page\s+(\d+)\s+of\s+\d+\s*-->")
 _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _FIGURE = re.compile(r"^!\[([^\]]*)\]\([^)]*\)\s*$")
 _SEP = re.compile(r"^\|?[\s:|-]+\|[\s:|-]*$")  # pipe-table separator row
+# "Figure 1: …" / "Table III." — the caption paragraph that gives a
+# figure marker its meaning; MinerU keeps it as the next text block.
+_CAPTION = re.compile(r"^(figure|table|listing)\s+[a-z0-9ivx]*\s*[:.]",
+                      re.IGNORECASE)
 
 
 def _starts_new_block(line: str) -> bool:
@@ -87,5 +91,15 @@ def markdown_to_blocks(md: str) -> list[Block]:
                 and not _starts_new_block(nxt):
             buf.append(nxt)
             i += 1
-        emit("text", " ".join(buf))
+        text = " ".join(buf)
+        prev = blocks[-1] if blocks else None
+        if prev is not None and prev.kind == "figure" and prev.page == page \
+                and _CAPTION.match(text):
+            # A bare "Image block" marker is a contentless chunk (§6
+            # wants figures as *useful* standalone chunks); the caption
+            # paragraph right below it is the figure's actual text.
+            blocks[-1] = Block("figure", f"{prev.text} — {text}",
+                               prev.page, prev.block)
+        else:
+            emit("text", text)
     return blocks

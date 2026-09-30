@@ -19,6 +19,15 @@ from dataclasses import dataclass
 TEXT_LIKE = ("text", "equation", "other")
 STANDALONE = ("table", "figure")
 
+# The one heading-path separator (§6: "paper title » section"); anything
+# reading a path (the store's doc assembly) goes through leaf().
+PATH_SEP = " » "
+
+
+def leaf(path: str) -> str:
+    """The deepest heading in a heading path; "" for the empty path."""
+    return path.split(PATH_SEP)[-1].strip() if path else ""
+
 
 @dataclass(frozen=True)
 class Block:
@@ -54,11 +63,11 @@ def chunk_document(title: str, blocks: list[Block],
     pending_tokens = 0
 
     def path() -> str:
-        return " » ".join(text for _, text in headings)
+        return PATH_SEP.join(text for _, text in headings)
 
     def emit(text: str, kind: str, first: Block, last: Block,
              path_at_emit: str) -> None:
-        prefix = f"{title} » {path_at_emit}" if path_at_emit else title
+        prefix = f"{title}{PATH_SEP}{path_at_emit}" if path_at_emit else title
         chunks.append(Chunk(
             text=text, embed_text=f"{prefix}\n{text}",
             section_path=path_at_emit,
@@ -67,8 +76,7 @@ def chunk_document(title: str, blocks: list[Block],
             kind=kind,
             # the leaf heading decides it — MinerU's markdown carries the
             # paper title as a level-1 heading above "Abstract".
-            is_abstract=path_at_emit.split(" » ")[-1]
-            .strip().lower() == "abstract"))
+            is_abstract=leaf(path_at_emit).lower() == "abstract"))
 
     def flush() -> None:
         nonlocal pending_tokens

@@ -231,12 +231,6 @@ def execute(call, project: Project) -> dict:
 
 # -- corpus tools (SPEC §6): the store behind the CorpusStore protocol -----
 
-def _locator(h) -> str:
-    pages = (f"p.{h.page_start}" if h.page_start == h.page_end
-             else f"pp.{h.page_start}-{h.page_end}")
-    return f"{pages}, blocks {h.block_start}-{h.block_end}"
-
-
 async def _corpus_search(call, project: Project, corpus, store) -> dict:
     if store is None:
         return {"error": CORPUS_DOWN}
@@ -248,15 +242,22 @@ async def _corpus_search(call, project: Project, corpus, store) -> dict:
         hits = await store.search(a["query"], k, boost)
     except Exception:
         return {"error": CORPUS_DOWN}  # §8: faulting index == no index
+    # One registry read for the whole page of hits (not one get per hit),
+    # and the registry is the source of truth: a chunk whose doc is gone
+    # (superseded mid-flight, failed re-fetch) must not surface with a
+    # blank title the agent would read as a real paper.
+    records = ({d.doc_id: d for d in corpus.list()}
+               if corpus is not None else {})
     results = []
-    for i, h in enumerate(hits, 1):
-        rec = corpus.get(h.doc_id) if corpus is not None else None
-        results.append({"n": i, "doc_id": h.doc_id,
-                        "title": rec.title if rec else "",
-                        "arxiv": rec.arxiv if rec else "",
-                        "doi": rec.doi if rec else "",
+    for h in hits:
+        rec = records.get(h.doc_id)
+        if rec is None:
+            continue
+        results.append({"n": len(results) + 1, "doc_id": h.doc_id,
+                        "title": rec.title, "arxiv": rec.arxiv,
+                        "doi": rec.doi,
                         "section": h.section_path,
-                        "locator": _locator(h), "kind": h.kind,
+                        "locator": h.locator, "kind": h.kind,
                         "text": h.text})
     return {"results": results,
             "note": ("corpus_doc(doc_id) for abstract + headings; cite_add "

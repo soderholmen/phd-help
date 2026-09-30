@@ -105,6 +105,35 @@ async def test_superseded_doc_chunks_are_evicted(corpus):
 
 
 @pytest.mark.anyio
+async def test_failed_supersede_leaves_no_orphan_chunks(corpus):
+    # add_pdf deletes the old record immediately; the old chunks must go
+    # before the new extract, or a failed re-fetch leaves chunks whose
+    # registry record is gone.
+    extractor = FakeExtractor()
+    store = FakeStore()
+    ing = make(corpus, extractor=extractor, store=store)
+    old, _ = corpus.add_pdf(b"v1", title="Paper", arxiv="1706.03762")
+    await ing.ingest(old.doc_id)
+    assert store.indexed  # old chunks live
+    extractor.fail = True
+    new, _ = corpus.add_pdf(b"v2", title="Paper", arxiv="1706.03762")
+    await ing.ingest(new.doc_id)
+    assert corpus.get(new.doc_id).status == "failed"
+    assert store.indexed == {}  # index matches the registry: no orphans
+
+
+@pytest.mark.anyio
+async def test_concurrent_ingest_does_not_poison_the_owner(corpus):
+    # upload + autojoin of the same paper race: the loser must not mark
+    # the winner's doc failed.
+    ing = make(corpus)
+    rec, _ = corpus.add_pdf(b"x", title="T")
+    corpus.set_status(rec.doc_id, "extracting")  # another ingest owns it
+    await ing.ingest(rec.doc_id)  # returns quietly
+    assert corpus.get(rec.doc_id).status == "extracting"
+
+
+@pytest.mark.anyio
 async def test_ingest_of_a_vanished_doc_is_quiet(corpus):
     # superseded mid-extraction: the record is gone; no crash, no write
     ing = make(corpus)
@@ -147,9 +176,12 @@ async def test_fetch_arxiv_registers_and_indexes(corpus):
     assert fetched == ["https://arxiv.org/pdf/2401.00001"]
     assert rec.source == "agent" and rec.arxiv == "2401.00001"
     assert corpus.get(rec.doc_id).status == "indexed"
-    # auto-join again (same paper, same search twice): dedup, no re-index
+    # auto-join again (same paper, same search twice): the registry is
+    # checked before the network — no re-download of an owned paper,
+    # no re-index, and the §6 1-req/3-s budget is spent on new papers
     again = await ing.fetch_arxiv("2401.00001")
     assert again.doc_id == rec.doc_id
+    assert fetched == ["https://arxiv.org/pdf/2401.00001"]
     assert len(store.indexed[rec.doc_id]) == 1  # indexed once
 
 

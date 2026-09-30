@@ -20,6 +20,7 @@ import lancedb
 import pyarrow as pa
 from lancedb.index import FTS
 
+from phd_helper.chunking import leaf
 from phd_helper.store import ChunkHit, DocInfo
 
 TABLE = "chunks"
@@ -136,8 +137,7 @@ class LanceStore:
         abstract = next((r["text"] for r in rows if r["is_abstract"]), "")
         headings: list[str] = []
         for r in rows:  # heading order = document order
-            leaf = r["section_path"].split(" » ")[-1] if r["section_path"] \
-                else ""
-            if leaf and leaf not in headings:
-                headings.append(leaf)
+            h = leaf(r["section_path"])
+            if h and h not in headings:
+                headings.append(h)
         return DocInfo(abstract=abstract, headings=tuple(headings))

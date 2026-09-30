@@ -67,6 +67,23 @@ def test_figure_marker_becomes_figure_block():
     assert "doc:bdfaa68" not in fig[0].text  # locator noise stripped
 
 
+def test_caption_merges_into_the_figure_chunk():
+    # A bare "Image block" is a contentless chunk; the caption paragraph
+    # below it is the figure's searchable text (§6: useful standalone
+    # figure chunks).
+    blocks = markdown_to_blocks(FIG)
+    assert len(blocks) == 1  # caption absorbed, not a separate text block
+    assert "The transformer architecture" in blocks[0].text
+
+
+def test_caption_like_prose_stays_its_own_text_block():
+    md = ("<!-- page 1 of 1 -->\n\n"
+          "![Image block](doc:x/tier:standard/page:1/block:1)\n\n"
+          "Figure 1 shows that scaling works.\n")
+    blocks = markdown_to_blocks(md)
+    assert [b.kind for b in blocks] == ["figure", "text"]
+
+
 EQ = """<!-- page 4 of 15 -->
 
 $$

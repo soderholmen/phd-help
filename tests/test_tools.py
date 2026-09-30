@@ -6,8 +6,11 @@ import pytest
 
 from phd_helper.bibtex import BibEntry
 from phd_helper.cascade import Lookup, ResolveResult, Response
+from phd_helper.chunking import Chunk
+from phd_helper.corpus import Corpus
 from phd_helper.project import Project
 from phd_helper.search import PaperHit
+from phd_helper.store import ChunkHit, DocInfo
 from phd_helper.toolcall import ValidCall
 from phd_helper.tools import (OFFERED, TOOL_SCHEMAS, execute,
                               execute_async, make_validators)
@@ -237,10 +240,6 @@ def test_cite_add_validator_checks_anchor(paper):
 
 # -- corpus_search / corpus_doc (SPEC §6): the store behind a fake ---------
 
-from phd_helper.chunking import Chunk  # noqa: E402
-from phd_helper.corpus import Corpus  # noqa: E402
-from phd_helper.store import ChunkHit, DocInfo  # noqa: E402
-
 
 class FakeStore:
     """Keyword-overlap stand-in for LanceDB; boost_ids doubles the score."""
@@ -312,6 +311,22 @@ async def test_corpus_search_returns_ranked_chunks_with_locators(paper, corpus):
     assert hit["section"] == "Method"
     assert hit["locator"] == "p.3, blocks 12-12"
     assert "corpus_doc" in result["note"]  # the chain the model should take
+
+
+@pytest.mark.anyio
+async def test_corpus_search_skips_chunks_without_a_record(paper, corpus):
+    # A failed supersede can leave chunks whose registry record is gone;
+    # the registry is the source of truth — an orphan must not surface
+    # with a blank title the agent would read as a real paper.
+    store = FakeStore()
+    rec = own(corpus, store, title="Real", body=b"a",
+              hits=[chunk("attention scores attention", block=3, page=2)])
+    store.rows.append(("ghost", chunk("attention scores attention")))
+    result = await execute_async(
+        call("corpus_search", {"query": "attention scores", "k": 5,
+                              "boost_pinned": False}),
+        paper, corpus=corpus, store=store)
+    assert [r["doc_id"] for r in result["results"]] == [rec.doc_id]
 
 
 @pytest.mark.anyio
