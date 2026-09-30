@@ -20,9 +20,8 @@ class FakeCE:
 
 
 def test_margins_squash_to_probabilities_in_order():
-    r = QwenReranker()
     ce = FakeCE()
-    r._model = ce  # bypass the lazy GPU load
+    r = QwenReranker(model=ce)  # injected: no lazy GPU load in the suite
     scores = r.rerank("q", ["a", "b", "c"])
     assert ce.pairs == [("q", "a"), ("q", "b"), ("q", "c")]
     assert scores[0] > 0.99 and scores[1] < 0.01
@@ -30,7 +29,5 @@ def test_margins_squash_to_probabilities_in_order():
 
 
 def test_boost_multiplier_only_ever_lifts():
-    r = QwenReranker()
-    r._model = FakeCE()
-    scores = r.rerank("q", ["a", "b", "c"])
+    scores = QwenReranker(model=FakeCE()).rerank("q", ["a", "b", "c"])
     assert all(s * 1.5 > s for s in scores)

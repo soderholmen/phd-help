@@ -181,12 +181,17 @@ async def test_rerank_docs_carry_the_section_path(tmp_path):
     assert any("Scaled Dot-Product Attention" in d for d in docs)
 
 
+def _odds_boost(p):
+    return p * 1.5 / (1.0 + p * 0.5)
+
+
 @pytest.mark.anyio
 async def test_boost_applies_after_the_rerank(tmp_path):
-    # attn 0.6 vs bird 0.8: bird leads on merit; the pinned multiplier
-    # (0.6 * 1.5 = 0.9) flips it — boost rides the reranked scale.
+    # attn 0.75 vs bird 0.8: bird leads on merit; the pinned odds
+    # boost (0.75 -> 0.82) flips the near tie — boost rides the
+    # reranked scale.
     rr = FakeReranker(
-        score=lambda q, d: 0.6 if "attention" in d.lower() else 0.8)
+        score=lambda q, d: 0.75 if "attention" in d.lower() else 0.8)
     store = rerank_store(tmp_path, rr)
     await store.index("attn", ATTN)
     await store.index("bird", OTHER)
@@ -195,7 +200,51 @@ async def test_boost_applies_after_the_rerank(tmp_path):
     boosted = await store.search("attention speech", k=4,
                                  boost_ids={"attn"})
     assert boosted[0].doc_id == "attn"
-    assert boosted[0].score == pytest.approx(0.6 * 1.5)
+    assert boosted[0].score == pytest.approx(_odds_boost(0.75))
+
+
+@pytest.mark.anyio
+async def test_boost_never_leaps_over_a_much_better_match(tmp_path):
+    # The saturation trap: probabilities cap at 1.0, so a raw x1.5
+    # would let a pinned 0.7 (-> 1.05) beat a near-certain 0.999. On
+    # odds, 0.7 -> 0.78 and the excellent unpinned chunk stays first.
+    rr = FakeReranker(
+        score=lambda q, d: 0.7 if "attention" in d.lower() else 0.999)
+    store = rerank_store(tmp_path, rr)
+    await store.index("attn", ATTN)
+    await store.index("bird", OTHER)
+    boosted = await store.search("attention speech", k=4,
+                                 boost_ids={"attn"})
+    assert boosted[0].doc_id == "bird"
+    assert boosted[0].score == pytest.approx(0.999)
+
+
+@pytest.mark.anyio
+async def test_reranker_nan_scores_fall_back(tmp_path):
+    # len() can't catch NaN: it would poison the sort into an
+    # undefined order and reach the agent as a score. Non-finite
+    # scores are a fault, and the RRF order stands (§8).
+    rr = FakeReranker(score=lambda q, d: float("nan"))
+    store = rerank_store(tmp_path, rr)
+    await store.index("attn", ATTN)
+    await store.index("bird", OTHER)
+    hits = await store.search("scaled dot product attention", k=2,
+                              boost_ids=set())
+    assert hits[0].doc_id == "attn"  # RRF order, not NaN chaos
+    assert all(h.score == h.score for h in hits)  # no NaN reported
+
+
+@pytest.mark.anyio
+async def test_reranker_uncoercible_scores_fall_back(tmp_path):
+    # Coercion must happen inside the guard: a reranker handing back
+    # None is a fault to degrade on, not a TypeError after it.
+    rr = FakeReranker(score=lambda q, d: None)
+    store = rerank_store(tmp_path, rr)
+    await store.index("attn", ATTN)
+    await store.index("bird", OTHER)
+    hits = await store.search("scaled dot product attention", k=2,
+                              boost_ids=set())
+    assert hits[0].doc_id == "attn"
 
 
 @pytest.mark.anyio
@@ -208,11 +257,11 @@ async def test_reranker_failure_falls_back_to_rrf_order(tmp_path):
     await store.index("bird", OTHER)
     hits = await store.search("scaled dot product attention", k=3,
                               boost_ids=set())
-    store2 = LanceStore(tmp_path / "db3", FakeEmbedder())
-    await store2.index("attn", ATTN)
-    await store2.index("bird", OTHER)
-    ref = await store2.search("scaled dot product attention", k=3,
-                              boost_ids=set())
+    ref_store = LanceStore(tmp_path / "db-no-reranker", FakeEmbedder())
+    await ref_store.index("attn", ATTN)
+    await ref_store.index("bird", OTHER)
+    ref = await ref_store.search("scaled dot product attention", k=3,
+                                boost_ids=set())
     assert [(h.doc_id, h.block_start) for h in hits] == \
            [(h.doc_id, h.block_start) for h in ref]
 

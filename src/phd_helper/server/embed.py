@@ -8,6 +8,8 @@ otherwise — indexing is background work and a search embeds one query,
 so this is quality-critical, not latency-critical.
 """
 
+import threading
+
 
 class HarrierEmbedder:
     MODEL = "microsoft/harrier-oss-v1-0.6b"
@@ -17,15 +19,21 @@ class HarrierEmbedder:
         self.model_name = model_name or self.MODEL
         self._device = device
         self._model = None
+        self._lock = threading.Lock()
 
     def _load(self):
+        # Double-checked: a background ingest and a search loading the
+        # model at once must not both pay for a copy (transient double
+        # VRAM against §1's budget).
         if self._model is None:
-            import torch  # heavy: only when the local stack is wired
-            from sentence_transformers import SentenceTransformer
-            device = self._device or (
-                "cuda" if torch.cuda.is_available() else "cpu")
-            self._model = SentenceTransformer(self.model_name,
-                                              device=device)
+            with self._lock:
+                if self._model is None:
+                    import torch  # heavy: only when the stack is wired
+                    from sentence_transformers import SentenceTransformer
+                    device = self._device or (
+                        "cuda" if torch.cuda.is_available() else "cpu")
+                    self._model = SentenceTransformer(self.model_name,
+                                                      device=device)
         return self._model
 
     def encode(self, texts: list[str]) -> list[list[float]]:

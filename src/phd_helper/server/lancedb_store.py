@@ -5,11 +5,14 @@ BM25 + vector, RRF-fused (verified against lancedb 0.39: the working
 form is ``search(query_type="hybrid").vector(q).text(query)``). When a
 reranker is wired (server/rerank.py), the fused top-50 goes through it
 and its scores replace the RRF ones; a reranker that faults or returns
-a misaligned score list degrades to the RRF order rather than sinking
-the search (§8). The pinned-doc boost rides on top of the final scores:
-pinned docs get a multiplier and the list re-sorts, so a pinned doc
-wins ties and near ties but a bad pinned doc still loses to a much
-better match — boosted, never filtered to (§6).
+unusable scores degrades to the RRF order rather than sinking the
+search (§8). The pinned-doc boost rides on top of the final scores as
+a multiplier on the ODDS, not the score itself — scores arrive on two
+very different scales (RRF ~0.03, reranker probabilities 0–1), and a
+raw multiplier saturates: pinned P=0.7 × 1.5 would beat a near-certain
+unpinned P=0.999. On odds the same 1.5 is a gentle nudge at RRF's
+scale, flips near ties at the probability scale, and never crosses a
+much better match — boosted, never filtered to (§6).
 
 The embedder and reranker are the sync seams (server/embed.py,
 server/rerank.py); every method here is async and offloads model work
@@ -19,6 +22,7 @@ to None (§8).
 """
 
 import asyncio
+import math
 
 import lancedb
 import pyarrow as pa
@@ -30,6 +34,15 @@ from phd_helper.store import ChunkHit, DocInfo
 TABLE = "chunks"
 BOOST = 1.5
 RERANK_CANDIDATES = 50  # §6: rerank over top-50, not over k
+
+
+def _boost(p: float) -> float:
+    """Multiply the odds, not the probability (§6: boosted, never
+    filtered — and never leaping over a much better match). Equivalent
+    to ``p * BOOST`` when p is tiny (the RRF scale), graceful when p
+    approaches 1 (the reranker's scale): 0.75 -> 0.82 flips a tie with
+    0.8, but 0.7 -> 0.78 still loses to 0.999."""
+    return p * BOOST / (1.0 + p * (BOOST - 1.0))
 
 
 def _quote(value: str) -> str:
@@ -116,13 +129,14 @@ class LanceStore:
         # Over-fetch: the boost re-sort (and the rerank stage) must
         # choose from a wide enough field that a good doc outside the
         # raw top-k — or a pinned doc outside it — can still land.
-        limit = RERANK_CANDIDATES if self.reranker else max(k * 3, 10)
+        limit = (max(RERANK_CANDIDATES, k) if self.reranker
+                 else max(k * 3, 10))
         rows = (t.search(query_type="hybrid")
                 .vector(q).text(query).limit(limit).to_list())
         rows = await self._rerank(query, rows)
         for r in rows:
             if r["doc_id"] in boost_ids:
-                r["_relevance_score"] *= BOOST
+                r["_relevance_score"] = _boost(r["_relevance_score"])
         rows.sort(key=lambda r: r["_relevance_score"], reverse=True)
         return [ChunkHit(doc_id=r["doc_id"], text=r["text"],
                          section_path=r["section_path"],
@@ -137,25 +151,32 @@ class LanceStore:
     async def _rerank(self, query: str, rows: list[dict]) -> list[dict]:
         """Re-score the fused candidates with the cross-encoder, in
         place on the score field (§6). The doc text carries the section
-        path — the same heading context the embedder saw, and what lets
-        the reranker tell two chunks with shared prose apart.
+        path — heading context, as in the embedder's input (minus the
+        title, which the row doesn't store) — and what lets the reranker
+        tell two chunks with shared prose apart.
 
-        Degrades, never sinks (§8): a faulting reranker or one whose
-        scores don't line up with the candidates leaves the RRF order
-        untouched — a misaligned score list would graft scores onto the
-        wrong chunks, which is worse than no rerank at all."""
+        Degrades, never sinks (§8): a reranker that faults, returns
+        scores that won't coerce to finite floats (a NaN would poison
+        the sort into an undefined order and reach the agent as a
+        score), or returns a list that doesn't line up with the
+        candidates, leaves the RRF order untouched — a misaligned score
+        grafted onto the wrong chunks is worse than no rerank at all.
+        Coercion happens inside the try: a reranker handing back None
+        or strings is a fault, not a crash after the guard."""
         if self.reranker is None or not rows:
             return rows
         docs = [f"{r['section_path']}\n{r['text']}" for r in rows]
         try:
-            scores = await asyncio.to_thread(self.reranker.rerank,
-                                            query, docs)
+            scores = [float(s) for s in
+                      await asyncio.to_thread(self.reranker.rerank,
+                                             query, docs)]
         except Exception:
             return rows
-        if len(scores) != len(rows):
+        if len(scores) != len(rows) or not all(
+                -math.inf < s < math.inf for s in scores):
             return rows
         for r, s in zip(rows, scores):
-            r["_relevance_score"] = float(s)
+            r["_relevance_score"] = s
         return rows
 
     async def doc(self, doc_id: str) -> DocInfo | None:

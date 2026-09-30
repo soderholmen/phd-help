@@ -156,7 +156,7 @@ A dedicated fast transformation (fixed-format task, fast sampling config) turns 
 - **Extraction**: MinerU 4.0 standard tier (stable page/block citation locators). Quality ceiling if ever needed: Chandra 2 served on the server.
 - **Chunking**: section-aware on MinerU's block tree; heading-path prefix prepended (`paper title » section`); tables/figures as standalone chunks; ~512–1024 token cap.
 - **Embeddings**: harrier-oss-v1-0.6b (MIT); upgrade path harrier-oss-v1-27b or Qwen3-Embedding-8B served on the server.
-- **Store**: embedded **LanceDB** — Tantivy FTS (BM25) + vector + RRF fusion + rerank (Qwen3-Reranker-0.6B over top-50) in one library call, no server. Brute-force vectors are fine at this scale (~10⁵ chunks).
+- **Store**: embedded **LanceDB** — Tantivy FTS (BM25) + vector + RRF fusion in one library call, no server; rerank (Qwen3-Reranker-0.6B over the fused top-50) rides as a second stage on the store side, since LanceDB has no native reranker. Brute-force vectors are fine at this scale (~10⁵ chunks).
 - **One global index** across projects; pinned docs boosted, not filtered.
 - **Agent-facing only**: `corpus_search(query, k, boost_pinned)` → ranked chunks with page/block locators + doc ids; `corpus_doc(doc_id)` → abstract, headings, bib status. Locators are what let the agent cite precisely and say "§3.2 of the parakeet paper" in voice. **No user-facing search UI** — the user asks the agent by voice.
 

@@ -19,26 +19,35 @@ never waits on it and the §8 degraded path pays nothing.
 """
 
 import math
+import threading
 
 
 class QwenReranker:
     MODEL = "Qwen/Qwen3-Reranker-0.6B"
 
     def __init__(self, model_name: str | None = None,
-                 device: str | None = None, max_length: int = 1024):
+                 device: str | None = None, max_length: int = 1024,
+                 model=None):
         self.model_name = model_name or self.MODEL
         self._device = device
         self._max_length = max_length
-        self._model = None
+        self._model = model  # injectable for tests, like MinerU's run
+        self._lock = threading.Lock()
 
     def _load(self):
+        # Double-checked: two concurrent first searches (two sessions,
+        # or a search during the ingest drain) must not both load the
+        # model — the loser's copy is transient double VRAM.
         if self._model is None:
-            import torch  # heavy: only when the local stack is wired
-            from sentence_transformers import CrossEncoder
-            device = self._device or (
-                "cuda" if torch.cuda.is_available() else "cpu")
-            self._model = CrossEncoder(self.model_name, device=device,
-                                       max_length=self._max_length)
+            with self._lock:
+                if self._model is None:
+                    import torch  # heavy: only when the stack is wired
+                    from sentence_transformers import CrossEncoder
+                    device = self._device or (
+                        "cuda" if torch.cuda.is_available() else "cpu")
+                    self._model = CrossEncoder(
+                        self.model_name, device=device,
+                        max_length=self._max_length)
         return self._model
 
     def rerank(self, query: str, docs: list[str]) -> list[float]:

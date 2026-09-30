@@ -45,9 +45,10 @@ class Reranker(Protocol):
     behind the tiny sync seam the store talks to — same shape as the
     embedder's ``encode``.
 
-    Scores must be positive (probabilities, not margins): the pinned-doc
-    boost is a multiplier, and on a signed scale multiplying would bury
-    a pinned doc instead of lifting it."""
+    Scores must be probabilities in [0, 1], not margins: the pinned-doc
+    boost multiplies the odds, which is only meaningful on a bounded
+    positive scale (a signed margin would let multiplying bury a
+    pinned doc instead of lifting it)."""
 
     def rerank(self, query: str, docs: list[str]) -> list[float]:
         """One relevance score per (query, doc) pair, in input order."""
