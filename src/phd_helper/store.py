@@ -75,3 +75,10 @@ class CorpusStore(Protocol):
     async def remove(self, doc_id: str) -> None:
         """Drop a superseded document's chunks."""
         ...
+
+    async def healthy(self) -> bool:
+        """Cheap liveness probe (§8): the index opens and counts. Must
+        not touch the embedder/reranker — /health rides every
+        heartbeat, and a configured-but-faulting store must not
+        report ok."""
+        ...

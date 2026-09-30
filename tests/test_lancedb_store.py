@@ -279,6 +279,45 @@ async def test_reranker_wrong_length_falls_back(tmp_path):
     assert hits[0].doc_id == "attn"  # RRF order, not the bogus 0.9s
 
 
+# -- the §8 health probe: open + count, never the models --------------------
+
+
+@pytest.mark.anyio
+async def test_healthy_true_for_empty_and_populated_store(store):
+    assert await store.healthy() is True  # no table yet: empty, not broken
+    await store.index("attn", ATTN)
+    assert await store.healthy() is True
+
+
+@pytest.mark.anyio
+async def test_healthy_never_loads_the_embedder(store):
+    # /health rides every heartbeat: the probe is open+count, not a
+    # search — a probe that encoded would drag the GPU model in.
+    class CountingEmbedder(FakeEmbedder):
+        def __init__(self):
+            self.calls = 0
+
+        def encode(self, texts):
+            self.calls += 1
+            return super().encode(texts)
+    store.embedder = CountingEmbedder()
+    assert await store.healthy() is True
+    assert store.embedder.calls == 0
+
+
+@pytest.mark.anyio
+async def test_healthy_false_when_the_store_faults(tmp_path):
+    # A configured store that raises on open is a fault, not "ok" (§8):
+    # the locked-file / corrupt-manifest case the issue names.
+    store = LanceStore(tmp_path / "db", FakeEmbedder())
+
+    class Locked:
+        def list_tables(self):
+            raise OSError("lance manifest locked")
+    store._db = Locked()
+    assert await store.healthy() is False
+
+
 @pytest.mark.anyio
 async def test_reranker_sees_the_wide_candidate_field(tmp_path):
     # §6 reranks over top-50, not over k: with k=1 the reranker must

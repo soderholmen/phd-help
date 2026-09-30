@@ -119,6 +119,18 @@ class LanceStore:
         if t is not None and t.count_rows():
             t.delete(f"doc_id = '{_quote(doc_id)}'")
 
+    async def healthy(self) -> bool:
+        """§8: open + count, nothing more. A locked file or corrupt
+        manifest must read as faulted, not ok — and the probe never
+        encodes, so it can't drag the embedder onto the GPU."""
+        try:
+            t = await asyncio.to_thread(self._table)
+            if t is not None:
+                await asyncio.to_thread(t.count_rows)
+            return True
+        except Exception:
+            return False
+
     async def search(self, query: str, k: int,
                      boost_ids: set[str]) -> list[ChunkHit]:
         t = self._table()

@@ -255,3 +255,51 @@ def test_select_section_control_frame_is_acknowledged(tmp_path):
             ws.send_json({"type": "select_section", "section": "nope.tex"})
             err = ws.receive_json()
             assert err["type"] == "error" and err["where"] == "control"
+
+
+# -- /health store probe (SPEC §8, issue #22) -------------------------------
+# §8: "the backend health-probes each component so state is known, not
+# discovered mid-turn" — a configured-but-faulting store must not report ok.
+
+
+class OkLlm:
+    async def healthy(self):
+        return True
+
+
+class ProbedStore:
+    def __init__(self, ok=True):
+        self.ok = ok
+        self.probes = 0
+
+    async def healthy(self):
+        self.probes += 1
+        return self.ok
+
+
+def health_state(tmp_path, store):
+    return SimpleNamespace(
+        llm=OkLlm(), stt=StubStt(), tts=StubTts(), endpoint=VoiceEndpoint(),
+        corpus=Corpus(tmp_path / "c"), corpus_store=store, http=FakeHttp(),
+        ingestor=None, ingest_tasks=set())
+
+
+def test_health_probes_the_store_not_just_the_config(tmp_path):
+    store = ProbedStore(ok=True)
+    with TestClient(create_app(state=health_state(tmp_path, store))) as c:
+        assert c.get("/health").json()["corpus"] == "ok"
+    assert store.probes == 1  # a real probe per call, not a config read
+
+
+def test_health_reports_a_configured_but_faulting_store(tmp_path):
+    # A LanceDB that is wired but faulting (locked file, corrupt
+    # manifest) used to report "ok" until a search actually failed.
+    with TestClient(create_app(
+            state=health_state(tmp_path, ProbedStore(ok=False)))) as c:
+        assert c.get("/health").json()["corpus"] == "faulted"
+
+
+def test_health_reports_paused_without_a_store(tmp_path):
+    # No stack configured: indexing pauses, visibly (§8) — unchanged.
+    with TestClient(create_app(state=health_state(tmp_path, None))) as c:
+        assert c.get("/health").json()["corpus"] == "paused"

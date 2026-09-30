@@ -329,12 +329,17 @@ def create_app(state: "AppState | None" = None) -> FastAPI:
 
     @app.get("/health")
     async def health():
+        # §8: the store is probed, not config-read — a wired-but-faulting
+        # LanceDB (locked file, corrupt manifest) must read faulted, not ok.
+        corpus = "paused"
+        if state.corpus_store is not None:
+            corpus = "ok" if await state.corpus_store.healthy() else "faulted"
         return {
             "vllm": await state.llm.healthy(),
             "stt": "faulted" if state.stt.faulted() else "stub",
             "tts": "faulted" if state.tts.faulted() else "stub",
-            # §8: indexing pauses (queued docs wait visibly) without the store.
-            "corpus": "ok" if state.corpus_store is not None else "paused",
+            # No store configured: indexing pauses (queued docs wait visibly).
+            "corpus": corpus,
             "endpoint_holder": state.endpoint.endpoint(time.monotonic()),
         }
 
