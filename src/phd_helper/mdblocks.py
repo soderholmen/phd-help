@@ -42,6 +42,7 @@ def markdown_to_blocks(md: str) -> list[Block]:
     page = 1
     next_block = 1  # page-local id space; reset at each page marker
     blocks: list[Block] = []
+    captioned: set[int] = set()  # figure indices that already hold a caption
 
     def emit(kind: str, text: str, level: int = 0,
              block: int | None = None, at_page: int | None = None) -> None:
@@ -117,14 +118,19 @@ def markdown_to_blocks(md: str) -> list[Block]:
             buf.append(nxt)
             i += 1
         text = " ".join(buf)
+        prev_i = len(blocks) - 1
         prev = blocks[-1] if blocks else None
         if prev is not None and prev.kind == "figure" and prev.page == page \
-                and _CAPTION.match(text):
+                and prev_i not in captioned and _CAPTION.match(text):
             # A bare "Image block" marker is a contentless chunk (§6
             # wants figures as *useful* standalone chunks); the caption
             # paragraph right below it is the figure's actual text.
+            # Only the *first* paragraph after the marker is the caption
+            # — the merged chunk still reads as a figure, so a later
+            # float-label-looking body paragraph must not cascade in.
             blocks[-1] = Block("figure", f"{prev.text} — {text}",
                                prev.page, prev.block)
+            captioned.add(prev_i)
         else:
             emit("text", text)
     return blocks

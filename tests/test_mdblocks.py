@@ -128,6 +128,33 @@ def test_caption_like_prose_stays_its_own_text_block():
     assert [b.kind for b in blocks] == ["figure", "text"]
 
 
+def test_second_caption_like_paragraph_does_not_merge():
+    # Only the first paragraph after a figure marker is its caption.
+    # After a merge the figure chunk is still blocks[-1] with kind
+    # "figure", so a later float-label-looking paragraph ("Table 2: …")
+    # must not cascade into the same chunk as more "caption".
+    md = ("<!-- page 1 of 1 -->\n\n"
+          "![Image block](doc:x/tier:standard/page:1/block:1)\n\n"
+          "Figure 1: The architecture.\n\n"
+          "Table 2: looks like a caption but is body prose.\n")
+    blocks = markdown_to_blocks(md)
+    assert [b.kind for b in blocks] == ["figure", "text"]
+    assert "looks like a caption" in blocks[1].text
+
+
+def test_body_paragraph_on_the_next_page_never_merges():
+    # The figure at the end of page 3 and a float-label-opening
+    # paragraph on page 4 are different pages: the same-page guard
+    # keeps the paragraph as its own text block.
+    md = ("<!-- page 3 of 9 -->\n\n"
+          "![Image block](doc:x/tier:standard/page:3/block:1)\n\n"
+          "<!-- page 4 of 9 -->\n\n"
+          "Figure 4: opens the next page as body prose.\n")
+    blocks = markdown_to_blocks(md)
+    assert [b.kind for b in blocks] == ["figure", "text"]
+    assert blocks[1].page == 4
+
+
 def test_caption_like_prose_with_a_comma_stays_separate():
     md = ("<!-- page 1 of 1 -->\n\n"
           "![Image block](doc:x/tier:standard/page:1/block:1)\n\n"
