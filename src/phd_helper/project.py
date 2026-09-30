@@ -15,6 +15,7 @@ from phd_helper.lint import lint_latex
 from phd_helper.pending import PendingDiff, PendingDiffs
 from phd_helper.patches import AnchoredPatch, ApplyResult, apply_patch, section_hash
 from phd_helper.sections import parse_section_tree
+from phd_helper.skeleton import build_skeleton
 
 
 class ProposeError(Exception):
@@ -35,12 +36,18 @@ class Project:
     def _files(self) -> dict[str, str]:
         out = {}
         for p in self.root.rglob("*.tex"):
-            out[str(p.relative_to(self.root)).replace("\\", "/")] = \
-                p.read_text(encoding="utf-8")
+            rel = p.relative_to(self.root)
+            if rel.parts[0] == ".phd-helper":
+                continue  # state dir: history snapshots are bytes, not files
+            out[str(rel).replace("\\", "/")] = p.read_text(encoding="utf-8")
         return out
 
     def section_tree(self):
         return parse_section_tree(self._files(), self.root_file)
+
+    def skeleton(self) -> str:
+        """The §4 never-drop paper map: title, abstract, headings."""
+        return build_skeleton(self._files(), self.root_file)
 
     def read_section(self, path: str) -> str:
         return (self.root / path).read_text(encoding="utf-8")

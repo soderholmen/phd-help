@@ -26,6 +26,17 @@ def paper(tmp_path: Path) -> Project:
     return Project(tmp_path)
 
 
+def test_state_directory_files_are_not_project_files(paper):
+    # .phd-helper/ holds history snapshots as .tex bytes; the per-turn
+    # skeleton/section-tree reads must not rglob through them.
+    snap = paper.root / ".phd-helper" / "history"
+    snap.mkdir(parents=True)
+    (snap / "intro.tex").write_text("\\title{Ghost Snapshot}\n",
+                                    encoding="utf-8")
+    assert not any(str(k).startswith(".phd-helper")
+                   for k in paper._files())
+
+
 def test_section_tree_from_root_graph(paper):
     paths = [n.path for n in paper.section_tree()]
     assert paths == ["sections/intro.tex", "sections/related.tex"]

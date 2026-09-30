@@ -37,6 +37,17 @@ class ContextInputs:
 @dataclass(frozen=True)
 class Context:
     parts: list[str]
+    # How many conversation turns survived the drop tiers. Conversation
+    # only ever drops oldest-first, so the wiring rebuilds the sent
+    # message list as the last N exchanges.
+    conversation_kept: int = 0
+
+
+def approx_tokens(text: str) -> int:
+    """Server-side token estimate: ~4 chars/token, no tokenizer dep. The
+    budget is an estimate by nature (window-agnostic priority, §4); this
+    only has to be monotone."""
+    return max(1, len(text) // 4) if text else 0
 
 
 # Drop tiers: 0 never drops; over budget, tiers drop in the order 2, 1, 3.
@@ -74,4 +85,6 @@ def assemble_context(
             # oldest first, down to the rolling summary (tier 0)
             parts.pop(candidates[-1] if tier == _PINNED else candidates[0])
 
-    return Context(parts=[text for _, text in parts])
+    return Context(
+        parts=[text for _, text in parts],
+        conversation_kept=sum(1 for tier, _ in parts if tier == _CONVERSATION))

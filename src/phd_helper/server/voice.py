@@ -53,7 +53,7 @@ class StubTts:
 
 
 CONTROL_TYPES = {"heartbeat", "arm", "disarm", "typed", "barge_in",
-                 "approve", "reject"}
+                 "approve", "reject", "select_section"}
 
 
 def parse_control(text: str) -> dict:

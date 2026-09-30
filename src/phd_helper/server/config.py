@@ -17,6 +17,17 @@ THINKING_SAMPLING = {"temperature": 1.0, "top_p": 0.95, "top_k": 20,
 PLAIN_SAMPLING = {"temperature": 0.7, "top_p": 0.8, "presence_penalty": 1.5}
 
 
+def _context_budget() -> int:
+    # Parsed at construction, not import: a typo must fail Config() with
+    # an actionable message, never crash every importer of this module.
+    raw = os.environ.get("PHD_CONTEXT_BUDGET", "8000")
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(
+            f"PHD_CONTEXT_BUDGET must be an integer, got {raw!r}") from None
+
+
 def _read_key_store(name):
     try:
         for line in KEY_STORE.read_text(encoding="utf-8").splitlines():
@@ -42,6 +53,11 @@ class Config:
     # SPEC §8 heartbeat cadence.
     ping_interval_s: float = 2.0
     lease_timeout_s: float = 60.0
+    # SPEC §4 per-turn assembly budget (approx tokens). A cost/focus knob
+    # for the assembly — window-agnostic priority, not a window cap; the
+    # current exchange's tool round-trips ride outside it (trimming them
+    # mid-loop would orphan tool results from their calls).
+    context_budget_tokens: int = field(default_factory=_context_budget)
     # SPEC §6 polite pools (gitignored env, never committed).
     crossref_mailto: str = os.environ.get("PHD_CROSSREF_MAILTO", "")
     openalex_mailto: str = os.environ.get("PHD_OPENALEX_MAILTO", "")

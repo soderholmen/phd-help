@@ -14,3 +14,18 @@ def test_valid_corpus_stack_values_pass():
 def test_typo_corpus_stack_fails_fast():
     with pytest.raises(ValueError, match="PHD_CORPUS_STACK"):
         Config(corpus_stack="lokal")
+
+
+def test_malformed_context_budget_fails_loudly_at_construction(monkeypatch):
+    # Parsed lazily (default_factory): a typo must fail Config() with an
+    # actionable message, never crash the module import for everyone.
+    monkeypatch.setenv("PHD_CONTEXT_BUDGET", "8k")
+    with pytest.raises(ValueError, match="PHD_CONTEXT_BUDGET"):
+        Config()
+    monkeypatch.setenv("PHD_CONTEXT_BUDGET", "12000")
+    assert Config().context_budget_tokens == 12000
+
+
+def test_explicit_context_budget_beats_the_env(monkeypatch):
+    monkeypatch.setenv("PHD_CONTEXT_BUDGET", "12000")
+    assert Config(context_budget_tokens=500).context_budget_tokens == 500

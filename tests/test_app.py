@@ -8,8 +8,17 @@ from fastapi.testclient import TestClient
 from types import SimpleNamespace
 
 from phd_helper.corpus import Corpus
+from phd_helper.endpoint import VoiceEndpoint
 from phd_helper.project import Project
 from phd_helper.server.app import Session, create_app
+from phd_helper.server.config import Config
+from phd_helper.server.voice import StubStt, StubTts
+from phd_helper.store import DocInfo
+
+
+class FakeHttp:
+    async def aclose(self):
+        pass
 
 
 @pytest.fixture
@@ -44,7 +53,7 @@ async def test_unexpected_error_becomes_an_error_event_not_silence(tmp_path):
         "\\input{sections/intro}\n\\end{document}\n", encoding="utf-8")
     (tmp_path / "sections" / "intro.tex").write_text("Hi.\n", encoding="utf-8")
     state = SimpleNamespace(project=Project(tmp_path), llm=BoomLlm(),
-                            tts=None, config=None, fetch=None,
+                            tts=None, config=Config(), fetch=None,
                             corpus=Corpus(tmp_path / "c"),
                             corpus_store=None, crossref_mailto="",
                             openalex_mailto="")
@@ -58,3 +67,191 @@ async def test_unexpected_error_becomes_an_error_event_not_silence(tmp_path):
     await session.run_turn("hello")  # must not raise out of the task
     assert any(e.get("type") == "error" and e.get("where") == "turn"
                for e in events)
+
+
+# -- per-turn context assembly wiring (SPEC §4, issue #20) -----------------
+# The §4 priority list must reach the LLM: skeleton + selected section +
+# pinned abstracts/headings, with the drop tiers actually dropping.
+
+
+class RecordingLlm:
+    def __init__(self):
+        self.calls: list[list[dict]] = []
+
+    async def chat(self, messages, **kwargs):
+        self.calls.append([dict(m) for m in messages])
+        return {"role": "assistant", "content": "ok"}, [], "ok"
+
+
+class DocStore:
+    """Store half of the §4 pinned contribution: doc() -> DocInfo."""
+
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    async def doc(self, doc_id):
+        if self.fail:
+            raise RuntimeError("lancedb locked")
+        return DocInfo("TRANSFORMER ABSTRACT",
+                       ("1 Introduction", "2 Architecture"))
+
+
+def make_env(tmp_path, store=None, budget=8000):
+    paper = tmp_path / "my-paper"
+    (paper / "sections").mkdir(parents=True, exist_ok=True)
+    (paper / "main.tex").write_text(
+        "\\title{My Paper}\n\\begin{document}\n"
+        "\\input{sections/intro}\n\\end{document}\n", encoding="utf-8")
+    (paper / "sections" / "intro.tex").write_text(
+        "\\section{Introduction}\nIntro body prose.\n", encoding="utf-8")
+    corpus = Corpus(tmp_path / "c")
+    rec, _ = corpus.add_pdf(b"%PDF-1", title="Attention Is All You Need",
+                            arxiv="1706.03762")
+    corpus.pin(rec.doc_id, "my-paper")
+    state = SimpleNamespace(project=Project(paper), llm=RecordingLlm(),
+                            tts=StubTts(), config=Config(
+                                context_budget_tokens=budget),
+                            fetch=None, corpus=corpus, corpus_store=store,
+                            crossref_mailto="", openalex_mailto="")
+    return state, Session(state, "c1")
+
+
+def sent_text(session) -> str:
+    return "\n".join(str(m.get("content") or "")
+                     for m in session.state.llm.calls[0])
+
+
+@pytest.mark.anyio
+async def test_pinned_source_abstract_and_headings_reach_the_llm(tmp_path):
+    state, session = make_env(tmp_path, store=DocStore())
+    await session.run_turn("hello")
+    joined = sent_text(session)
+    assert "TRANSFORMER ABSTRACT" in joined  # §4: always contribute
+    assert "2 Architecture" in joined
+    assert "My Paper" in joined  # the skeleton rides every turn
+
+
+@pytest.mark.anyio
+async def test_pinned_contribution_degrades_to_the_title_when_store_is_gone(
+        tmp_path):
+    for store in (None, DocStore(fail=True)):  # down, or faulting mid-call
+        state, session = make_env(tmp_path, store=store)
+        await session.run_turn("hello")
+        joined = sent_text(session)
+        assert "Attention Is All You Need" in joined  # never vanishes
+        assert "TRANSFORMER ABSTRACT" not in joined
+
+
+@pytest.mark.anyio
+async def test_over_budget_drops_pinned_but_never_the_map_or_the_request(
+        tmp_path):
+    # A pinned abstract big enough to blow the budget: the §4 tier order
+    # must drop it, keep skeleton + section, and clamp the conversation
+    # so the current request itself never drops.
+    class BigDocStore(DocStore):
+        async def doc(self, doc_id):
+            return DocInfo("X" * 4000, ("1 Introduction",))
+
+    state, session = make_env(tmp_path, store=BigDocStore(), budget=500)
+    assert session.select_section("sections/intro.tex")
+    await session.run_turn("hello")
+    joined = sent_text(session)
+    assert "X" * 4000 not in joined
+    assert "My Paper" in joined
+    assert "Intro body prose" in joined
+    assert "hello" in joined
+
+
+@pytest.mark.anyio
+async def test_hopeless_budget_still_sends_the_current_request(tmp_path):
+    state, session = make_env(tmp_path, store=DocStore(), budget=1)
+    await session.run_turn("the current ask")
+    assert session.state.llm.calls[0][-1]["content"] == "the current ask"
+
+
+@pytest.mark.anyio
+async def test_conversation_drops_keep_exchanges_whole(tmp_path):
+    # An old exchange with a tool round-trip: dropping conversation must
+    # never orphan a tool result from its assistant tool_calls message.
+    state, session = make_env(tmp_path, store=DocStore(), budget=1)
+    session.history += [
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "t1", "type": "function",
+                         "function": {"name": "section_read",
+                                      "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "t1", "content": "{}"},
+        {"role": "assistant", "content": "old answer"},
+    ]
+    await session.run_turn("new question")
+    msgs = session.state.llm.calls[0]
+    assert not any(m.get("content") == "old question" for m in msgs)
+    assert not any(m.get("tool_call_id") == "t1" for m in msgs)
+    assert msgs[-1]["content"] == "new question"
+
+
+def test_select_section_anchors_only_known_tree_nodes(tmp_path):
+    _, session = make_env(tmp_path)
+    assert session.select_section("sections/intro.tex")
+    assert session.selected == "sections/intro.tex"
+    assert not session.select_section("sections/nonexistent.tex")
+    assert session.selected == "sections/intro.tex"  # unchanged
+
+
+def test_empty_path_clears_the_anchor(tmp_path):
+    # An anchored section rides every later turn (§4); without a deselect
+    # the tab is stuck with it until reconnect.
+    _, session = make_env(tmp_path)
+    assert session.select_section("sections/intro.tex")
+    assert session.select_section("")
+    assert session.selected is None
+
+
+@pytest.mark.anyio
+async def test_pinned_docs_are_fetched_concurrently(tmp_path):
+    # store.doc is a blocking LanceDB query per doc; sequential awaits
+    # would add N round-trips of latency to every voice turn.
+    import asyncio
+
+    inflight = {"now": 0, "max": 0}
+
+    class SlowStore(DocStore):
+        async def doc(self, doc_id):
+            inflight["now"] += 1
+            inflight["max"] = max(inflight["max"], inflight["now"])
+            await asyncio.sleep(0.01)
+            inflight["now"] -= 1
+            return await super().doc(doc_id)
+
+    state, session = make_env(tmp_path, store=SlowStore())
+    rec2, _ = state.corpus.add_pdf(b"%PDF-2", title="Second Paper")
+    state.corpus.pin(rec2.doc_id, "my-paper")
+    await session.run_turn("hello")
+    assert inflight["max"] == 2
+
+
+@pytest.mark.anyio
+async def test_selected_section_body_rides_the_context(tmp_path):
+    state, session = make_env(tmp_path, store=DocStore())
+    assert session.select_section("sections/intro.tex")
+    await session.run_turn("tighten it")
+    assert "Intro body prose" in sent_text(session)
+
+
+def test_select_section_control_frame_is_acknowledged(tmp_path):
+    state, _ = make_env(tmp_path)
+    state.endpoint = VoiceEndpoint(ping_interval=2.0, lease_timeout=60.0)
+    state.stt = StubStt()
+    state.http = FakeHttp()
+    state.ingestor = None
+    state.ingest_tasks = set()
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "select_section",
+                          "section": "sections/intro.tex"})
+            assert ws.receive_json() == {"type": "section_selected",
+                                         "section": "sections/intro.tex"}
+            ws.send_json({"type": "select_section", "section": "nope.tex"})
+            err = ws.receive_json()
+            assert err["type"] == "error" and err["where"] == "control"

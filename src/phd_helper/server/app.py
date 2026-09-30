@@ -17,6 +17,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from phd_helper.cascade import ArxivRateLimited
+from phd_helper.context import (ContextInputs, PinnedSource, Turn,
+                                approx_tokens, assemble_context)
 from phd_helper.corpus import Corpus, CorpusError
 from phd_helper.endpoint import VoiceEndpoint
 from phd_helper.ingest import IngestError, Ingestor
@@ -52,10 +54,65 @@ class Session:
         self.client_id = client_id
         self.ws: WebSocket | None = None
         self.turn_task: asyncio.Task | None = None
+        # §1: clicking a tree node anchors the section-scoped discussion;
+        # the anchored section's body then rides every turn's context (§4).
+        self.selected: str | None = None
         sections = ", ".join(n.path for n in app_state.project.section_tree())
         self.history: list[dict] = [{"role": "system", "content":
                                      SYSTEM_PROMPT +
                                      f"\nProject sections: {sections}"}]
+
+    def select_section(self, path: str) -> bool:
+        if not path:
+            self.selected = None  # deselect: the anchor must be clearable
+            return True
+        known = {n.path for n in self.state.project.section_tree()}
+        if path not in known:
+            return False
+        self.selected = path
+        return True
+
+    async def _build_context(self):
+        """Assemble this turn's context (§4) and locate the conversation
+        tail that survived the drop tiers.
+
+        Returns (context message or None, index into the conversation
+        where the kept tail starts). The full log stays in ``history``;
+        only the sent message list is trimmed."""
+        project = self.state.project
+        section = ""
+        if self.selected:
+            try:
+                body = project.read_section(self.selected)
+            except OSError:
+                body = ""  # file vanished since selection: degrade (§8)
+            if body:
+                section = f"Selected section ({self.selected}):\n{body}"
+        pinned = await pinned_sources(self.state.corpus,
+                                      self.state.corpus_store,
+                                      project.root.name)
+        exchanges = _group_exchanges(self.history[1:])
+        inputs = ContextInputs(
+            section=section, skeleton=project.skeleton(),
+            memory="", distant_gists="", rolling_summary="",
+            turns=tuple(Turn("user", text) for text, _ in exchanges),
+            pinned=pinned)
+        ctx = assemble_context(
+            inputs, budget=self.state.config.context_budget_tokens,
+            count_tokens=approx_tokens)
+        # The current request is never droppable: clamp to the last
+        # exchange even when the assembly's tiers emptied the conversation.
+        kept = max(ctx.conversation_kept, 1) if exchanges else 0
+        tail = exchanges[len(exchanges) - kept:] if kept else []
+        start = sum(len(msgs) for _, msgs in exchanges) - \
+            sum(len(msgs) for _, msgs in tail)
+        # Conversation parts are the tail of ctx.parts; the rest is the
+        # context message (skeleton, gists, memory, section, pinned,
+        # summary — empties filtered).
+        head = ctx.parts[:len(ctx.parts) - ctx.conversation_kept]
+        content = "\n\n".join(p for p in head if p)
+        ctx_msg = {"role": "system", "content": content} if content else None
+        return ctx_msg, start
 
     async def send(self, event: dict):
         if self.ws is not None:
@@ -71,9 +128,14 @@ class Session:
         await self.send({"type": "turn_started"})
         project = self.state.project
         try:
+            ctx_msg, conv_start = await self._build_context()
             for _ in range(5):  # tool loop; the model ends with a text turn
+                msgs = [self.history[0]]
+                if ctx_msg is not None:
+                    msgs.append(ctx_msg)
+                msgs += self.history[1:][conv_start:]
                 msg, valid_calls, text = await self.state.llm.chat(
-                    self.history, tools=TOOL_SCHEMAS, offered=OFFERED,
+                    msgs, tools=TOOL_SCHEMAS, offered=OFFERED,
                     validators=make_validators(project))
                 if not valid_calls:
                     self.history.append({"role": "assistant",
@@ -190,6 +252,51 @@ def spawn_ingest(state, doc_id: str) -> None:
     if state.ingestor is not None and state.ingestor.runnable():
         spawn(state, state.ingestor.ingest(doc_id))
     # not runnable: the doc stays queued — paused, visible (§8)
+
+
+def _group_exchanges(messages: list[dict]) -> list[tuple[str, list[dict]]]:
+    """Partition the conversation log into exchanges: a user message opens
+    one, everything until the next user message belongs to it (assistant
+    tool-call turns and tool results included). Dropping conversation over
+    budget must never orphan a tool result from its tool_calls message."""
+    exchanges: list[tuple[str, list[dict]]] = []
+    for m in messages:
+        text = str(m.get("content") or "")
+        if m.get("role") == "user" or not exchanges:
+            exchanges.append((text, [m]))
+        else:
+            prev, msgs = exchanges[-1]
+            exchanges[-1] = (f"{prev}\n{text}", msgs + [m])
+    return exchanges
+
+
+async def _doc_info(store, doc_id: str):
+    if store is None:
+        return None
+    try:
+        return await store.doc(doc_id)
+    except Exception:
+        return None  # faulting store degrades per §8, never kills the turn
+
+
+async def pinned_sources(corpus, store, project_name: str):
+    """§4: pinned sources always contribute abstract + headings. With the
+    store down or faulting they degrade to the registry title (§8) — a pin
+    that silently vanishes from context is worse than a thin one. The
+    doc() lookups fan out concurrently: each is a blocking LanceDB query,
+    and sequential awaits would stack N round-trips onto every turn."""
+    recs = [r for r in corpus.list()  # attach order: recent pins drop first
+            if project_name in r.pinned_in]
+    infos = await asyncio.gather(*(_doc_info(store, r.doc_id) for r in recs))
+    out = []
+    for rec, info in zip(recs, infos):
+        label = f"Pinned source: {rec.title or rec.doc_id} (doc {rec.doc_id})"
+        if info is not None:
+            out.append(PinnedSource(rec.doc_id, f"{label}\n{info.abstract}",
+                                    "\n".join(info.headings)))
+        else:
+            out.append(PinnedSource(rec.doc_id, label, ""))
+    return tuple(out)
 
 
 async def autojoin(state, hits) -> None:
@@ -342,6 +449,16 @@ def create_app(state: "AppState | None" = None) -> FastAPI:
             # Qualifying interrupt: stop TTS now, abort thinking (§3).
             session.cancel_turn()
             await session.send({"type": "tts_stopped"})
+        elif kind == "select_section":
+            # §1: clicking a tree node anchors the section-scoped
+            # discussion; the body then rides every later turn (§4).
+            path = str(msg.get("section", ""))
+            if session.select_section(path):
+                await session.send({"type": "section_selected",
+                                    "section": session.selected})
+            else:
+                await session.send({"type": "error", "where": "control",
+                                    "message": f"no such section: {path}"})
         elif kind in ("approve", "reject"):
             section, diff_id = msg.get("section"), msg.get("diff_id")
             if kind == "approve":

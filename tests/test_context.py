@@ -3,7 +3,8 @@ Never drop the selected section, paper memory, or skeleton; drop in order —
 pinned-paper abstracts/headings, then conversation beyond the rolling
 summary, then far-away section gists."""
 
-from phd_helper.context import ContextInputs, PinnedSource, Turn, assemble_context
+from phd_helper.context import (ContextInputs, PinnedSource, Turn,
+                                approx_tokens, assemble_context)
 
 INPUTS = ContextInputs(
     section="SECTION BODY",
@@ -85,3 +86,23 @@ def test_never_drops_the_section_memory_or_skeleton_even_when_budget_is_hopeless
     joined = "\n".join(context.parts)
     for kept in ("PAPER SKELETON", "PAPER MEMORY", "SECTION BODY"):
         assert kept in joined
+
+
+def test_conversation_kept_counts_the_surviving_turns_for_the_wiring():
+    # The wiring rebuilds the sent message list from this count: conversation
+    # drops oldest-first, so survivors are always the last N turns.
+    assert assemble_context(INPUTS, budget=1000,
+                            count_tokens=count_words).conversation_kept == 2
+    assert assemble_context(INPUTS, budget=13,
+                            count_tokens=count_words).conversation_kept == 1
+    assert assemble_context(INPUTS, budget=9,
+                            count_tokens=count_words).conversation_kept == 0
+
+
+def test_approx_tokens_is_a_monotone_char_heuristic():
+    # No tokenizer dependency server-side; the budget is an estimate, but
+    # it must be monotone and empty text must cost nothing.
+    assert approx_tokens("") == 0
+    assert approx_tokens("abcd") == 1
+    assert approx_tokens("abcdefgh") == 2
+    assert approx_tokens("ab") >= 1  # short non-empty text is never free
