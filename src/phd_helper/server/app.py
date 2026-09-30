@@ -143,15 +143,25 @@ class AppState:
             lease_timeout=self.config.lease_timeout_s)
         # One active project at a time (§7); scaffold ships the sample paper.
         self.project = Project(REPO_ROOT / "sample_paper")
-        # One global corpus across projects (§6). The registry is live now;
-        # the LanceDB/embedder store adapter waits on the 3090 stack — until
-        # then the corpus tools degrade to tool errors per the §8 matrix.
+        # One global corpus across projects (§6). The registry is live
+        # always; the heavy stack is config-gated (PHD_CORPUS_STACK):
+        # "off" degrades per the §8 matrix, "local" runs MinerU + harrier
+        # + LanceDB on this machine. Imports stay inside the branch so the
+        # off path never pays for lancedb/torch.
         self.corpus = Corpus(REPO_ROOT / "corpus_data")
         self.corpus_store = None
+        extractor = None
+        if self.config.corpus_stack == "local":
+            from phd_helper.server.embed import HarrierEmbedder
+            from phd_helper.server.lancedb_store import LanceStore
+            from phd_helper.server.mineru import MinerUExtractor
+            self.corpus_store = LanceStore(
+                REPO_ROOT / "corpus_data" / "lancedb", HarrierEmbedder())
+            extractor = MinerUExtractor()
         # PDF fetch is arXiv-spaced too (§6 politeness covers all arXiv
         # access, not just the bibtex cascade).
         self.fetch_pdf = ArxivRateLimited(self.http.fetch_bytes)
-        self.ingestor = Ingestor(self.corpus, extractor=None,
+        self.ingestor = Ingestor(self.corpus, extractor=extractor,
                                  store=self.corpus_store,
                                  fetch_pdf=self._fetch_pdf)
         self.ingest_tasks: set[asyncio.Task] = set()

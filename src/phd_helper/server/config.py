@@ -45,6 +45,11 @@ class Config:
     # SPEC §6 polite pools (gitignored env, never committed).
     crossref_mailto: str = os.environ.get("PHD_CROSSREF_MAILTO", "")
     openalex_mailto: str = os.environ.get("PHD_OPENALEX_MAILTO", "")
+    # Where the heavy corpus stack runs: "off" keeps the §8 degraded path
+    # (store down, docs visibly queued); "local" wires MinerU + harrier +
+    # LanceDB on this machine (dev box today, the 3090 later — the server
+    # stays prod, this only picks where the adapters live).
+    corpus_stack: str = os.environ.get("PHD_CORPUS_STACK", "off")
 
     def sampling(self, thinking: bool) -> dict:
         return THINKING_SAMPLING if thinking else PLAIN_SAMPLING

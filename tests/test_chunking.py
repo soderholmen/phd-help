@@ -145,6 +145,18 @@ def test_abstract_heading_flags_its_chunks():
     assert chunks[0].section_path == "Abstract"
 
 
+def test_abstract_flags_under_a_title_heading():
+    # MinerU's markdown carries the paper title as a level-1 heading
+    # above "Abstract" — the leaf heading decides, not the whole path.
+    blocks = [B("heading", "The Paper", block=0, level=1),
+              B("heading", "Abstract", block=1, level=2),
+              B("text", "We propose a thing.", block=2),
+              B("heading", "1 Introduction", block=3, level=2),
+              B("text", "Intro.", block=4)]
+    chunks = chunk_document("The Paper", blocks)
+    assert [c.is_abstract for c in chunks] == [True, False]
+
+
 def test_heading_only_section_yields_no_chunk():
     blocks = [B("heading", "Empty Section", block=0, level=1),
               B("heading", "Next", block=1, level=1),

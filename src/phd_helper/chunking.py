@@ -1,8 +1,9 @@
 """Section-aware chunking of an extracted PDF (SPEC §6).
 
 Input is MinerU's block tree normalized to ``Block`` (the server adapter
-maps model.json onto this; chunking itself is pure and testable). Rules
-from §6: split on section headings, prepend the heading path
+maps MinerU 4.0's markdown onto this via mdblocks; chunking itself is
+pure and testable). Rules from §6: split on section headings, prepend
+the heading path
 (``paper title » section``) to the *embedded* text only, tables/figures
 as standalone chunks, ~512-1024 token cap, and stable page/block
 locators so the agent can say "§3.2 of the parakeet paper" precisely.
@@ -64,7 +65,10 @@ def chunk_document(title: str, blocks: list[Block],
             page_start=first.page, page_end=last.page,
             block_start=first.block, block_end=last.block,
             kind=kind,
-            is_abstract=path_at_emit.strip().lower() == "abstract"))
+            # the leaf heading decides it — MinerU's markdown carries the
+            # paper title as a level-1 heading above "Abstract".
+            is_abstract=path_at_emit.split(" » ")[-1]
+            .strip().lower() == "abstract"))
 
     def flush() -> None:
         nonlocal pending_tokens

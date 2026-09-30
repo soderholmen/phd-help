@@ -23,3 +23,6 @@ prototype/
 
 # Corpus store: PDFs + registry on the server filesystem (Syncthing-replicated)
 corpus_data/
+
+# MinerU 4.0's content-addressed parse cache (written to the CLI's cwd)
+blobs/
