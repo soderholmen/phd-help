@@ -548,3 +548,52 @@ async def test_disconnect_distills_summaries_too(tmp_path):
     # got a dated summary entry.
     assert state.project.load_summaries()["sections/intro.tex"][-1]["text"] \
         == "ok"
+
+
+# -- section tree door + nested selection (web shell, SPEC §1) --------------
+
+
+def _nested_paper(tmp_path):
+    paper = tmp_path / "my-paper"
+    (paper / "sections").mkdir(parents=True)
+    (paper / "main.tex").write_text(
+        "\begin{document}\n\input{sections/intro}\n\end{document}\n",
+        encoding="utf-8")
+    (paper / "sections" / "intro.tex").write_text(
+        "\section{Introduction}\n\input{sections/background}\n",
+        encoding="utf-8")
+    (paper / "sections" / "background.tex").write_text(
+        "\section{Background}\nBody.\n", encoding="utf-8")
+    return paper
+
+
+def test_sections_endpoint_returns_the_nested_tree(tmp_path):
+    # The shell's tree panel needs the parsed \input graph over HTTP;
+    # clicking a node anchors the discussion (§1).
+    state = SimpleNamespace(project=Project(_nested_paper(tmp_path)),
+                            http=FakeHttp(), corpus=Corpus(tmp_path / "c"),
+                            ingestor=None, ingest_tasks=set())
+    with TestClient(create_app(state=state)) as client:
+        tree = client.get("/sections").json()
+    assert tree == [{"path": "sections/intro.tex", "title": "Introduction",
+                     "children": [{"path": "sections/background.tex",
+                                   "title": "Background",
+                                   "children": []}]}]
+
+
+def test_select_section_accepts_nested_nodes(tmp_path):
+    # The tree is clickable at every depth (§1: "clicking a node
+    # anchors"); the known-set must flatten, not just top level. The
+    # system prompt's section list must carry nested paths too, or the
+    # model can't be asked to write into them.
+    state = SimpleNamespace(project=Project(_nested_paper(tmp_path)),
+                            llm=RecordingLlm(), tts=StubTts(),
+                            config=Config(), fetch=None,
+                            corpus=Corpus(tmp_path / "c"),
+                            corpus_store=None, crossref_mailto="",
+                            openalex_mailto="",
+                            ingest_tasks=set(), gist_task=None)
+    session = Session(state, "c1")
+    assert session.select_section("sections/background.tex")
+    assert session.selected == "sections/background.tex"
+    assert "sections/background.tex" in session.history[0]["content"]

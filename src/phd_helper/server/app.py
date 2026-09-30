@@ -50,6 +50,15 @@ SYSTEM_PROMPT = (
     "strings.\n")
 
 
+def flatten_tree(nodes):
+    """All tree paths, depth-first. The tree is clickable at every
+    depth (§1), so the known-set and the prompt's section list flatten
+    rather than stopping at the top level."""
+    for n in nodes:
+        yield n.path
+        yield from flatten_tree(n.children)
+
+
 class Session:
     """One browser tab's voice connection (§1: one WebSocket per tab)."""
 
@@ -61,7 +70,7 @@ class Session:
         # §1: clicking a tree node anchors the section-scoped discussion;
         # the anchored section's body then rides every turn's context (§4).
         self.selected: str | None = None
-        sections = ", ".join(n.path for n in app_state.project.section_tree())
+        sections = ", ".join(flatten_tree(app_state.project.section_tree()))
         self.history: list[dict] = [{"role": "system", "content":
                                      SYSTEM_PROMPT +
                                      f"\nProject sections: {sections}"}]
@@ -70,7 +79,7 @@ class Session:
         if not path:
             self.selected = None  # deselect: the anchor must be clearable
             return True
-        known = {n.path for n in self.state.project.section_tree()}
+        known = set(flatten_tree(self.state.project.section_tree()))
         if path not in known:
             return False
         self.selected = path
@@ -469,6 +478,15 @@ def create_app(state: "AppState | None" = None) -> FastAPI:
             "corpus": corpus,
             "endpoint_holder": state.endpoint.endpoint(time.monotonic()),
         }
+
+    @app.get("/sections")
+    async def sections():
+        # The shell's tree panel: the parsed \input graph (§1), nested —
+        # clicking a node sends select_section over the voice socket.
+        def node(n):
+            return {"path": n.path, "title": n.title,
+                    "children": [node(c) for c in n.children]}
+        return [node(n) for n in state.project.section_tree()]
 
     # -- corpus doors and status (SPEC §6): upload is door 1, the agent
     # fetch/auto-join is door 2; the UI reads status, never searches.
