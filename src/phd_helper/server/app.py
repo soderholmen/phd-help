@@ -35,6 +35,7 @@ from phd_helper.tools import (OFFERED, TOOL_SCHEMAS, execute_async,
                               make_validators)
 
 WEB_DIR = Path(__file__).resolve().parents[3] / "web"
+DIST_DIR = WEB_DIR / "app" / "dist"  # the built React shell (npm run build)
 
 # SPEC §2: these two rules are verbatim — they fixed every probe failure.
 SYSTEM_PROMPT = (
@@ -160,9 +161,14 @@ class Session:
         try:
             ctx_msg, conv_start = await self._build_context()
             for _ in range(5):  # tool loop; the model ends with a text turn
-                msgs = [self.history[0]]
+                # One system message, always: vLLM 400s on a second one
+                # ("System message must be at the beginning"), so the
+                # §4 context merges into the prompt message.
+                sys_msg = self.history[0]
                 if ctx_msg is not None:
-                    msgs.append(ctx_msg)
+                    sys_msg = {"role": "system", "content":
+                               sys_msg["content"] + "\n\n" + ctx_msg["content"]}
+                msgs = [sys_msg]
                 msgs += self.history[1:][conv_start:]
                 msg, valid_calls, text = await self.state.llm.chat(
                     msgs, tools=TOOL_SCHEMAS, offered=OFFERED,
@@ -447,7 +453,8 @@ async def autojoin(state, hits) -> None:
                                                 year=h.year))
 
 
-def create_app(state: "AppState | None" = None) -> FastAPI:
+def create_app(state: "AppState | None" = None,
+               web_dir: Path | None = None) -> FastAPI:
     state = state or AppState()
 
     @asynccontextmanager
@@ -634,12 +641,6 @@ def create_app(state: "AppState | None" = None) -> FastAPI:
                                     "diff_id": diff_id, "applied": False,
                                     "reason": "discarded", "text": None})
 
-    if WEB_DIR.is_dir():
-        @app.get("/")
-        async def index():
-            return FileResponse(WEB_DIR / "index.html")
-        app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
-
     # Private-CA root cert for devices to install (public half only; the CA
     # key never leaves certs/, which is gitignored).
     ca_pem = REPO_ROOT / "certs" / "ca.pem"
@@ -647,6 +648,15 @@ def create_app(state: "AppState | None" = None) -> FastAPI:
         @app.get("/ca.pem")
         async def ca_pem_download():
             return FileResponse(ca_pem, media_type="application/x-pem-file")
+
+    # The built React shell (web/app/dist): hashed assets, the capture
+    # worklet, index.html for the app itself. Mounted last and at "/", so
+    # every API route above keeps winning; the mount only catches the
+    # rest (html=True serves index.html for "/"). No build: no root
+    # route — dev runs the Vite server against the proxy instead.
+    dist = web_dir if web_dir is not None else DIST_DIR
+    if dist.is_dir():
+        app.mount("/", StaticFiles(directory=dist, html=True), name="shell")
     return app
 
 

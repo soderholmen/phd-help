@@ -597,3 +597,41 @@ def test_select_section_accepts_nested_nodes(tmp_path):
     assert session.select_section("sections/background.tex")
     assert session.selected == "sections/background.tex"
     assert "sections/background.tex" in session.history[0]["content"]
+
+
+# -- shell serving (web/app/dist, SPEC §1) ----------------------------------
+
+
+def test_the_built_shell_is_served_and_api_routes_still_win(tmp_path):
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text(
+        "<html><body><div id='root'>shell</div></body></html>",
+        encoding="utf-8")
+    (dist / "assets" / "index-abc.js").write_text("//hashed", encoding="utf-8")
+    with TestClient(create_app(state=health_state(tmp_path, None),
+                               web_dir=dist)) as c:
+        assert "shell" in c.get("/").text
+        assert c.get("/assets/index-abc.js").text == "//hashed"
+        # The mount is registered last: API routes keep winning.
+        assert c.get("/health").json()["corpus"] == "paused"
+
+
+def test_no_shell_build_means_no_root_route(tmp_path):
+    with TestClient(create_app(state=health_state(tmp_path, None),
+                               web_dir=tmp_path / "missing")) as c:
+        assert c.get("/").status_code == 404
+
+
+@pytest.mark.anyio
+async def test_the_sent_request_carries_exactly_one_system_message(tmp_path):
+    # Live vLLM rejects a second system message ("System message must be
+    # at the beginning", 400) — the §4 context message must merge into
+    # the prompt one, not ride beside it. Fake LLMs never noticed.
+    state, session = make_env(tmp_path, store=DocStore())
+    session.select_section("sections/intro.tex")
+    await session.run_turn("hello")
+    msgs = state.llm.calls[0]
+    assert [i for i, m in enumerate(msgs) if m["role"] == "system"] == [0]
+    assert "phd-helper" in msgs[0]["content"]      # the prompt
+    assert "Intro body prose" in msgs[0]["content"]  # the §4 context
