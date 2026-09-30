@@ -155,8 +155,10 @@ class AppState:
             from phd_helper.server.embed import HarrierEmbedder
             from phd_helper.server.lancedb_store import LanceStore
             from phd_helper.server.mineru import MinerUExtractor
+            from phd_helper.server.rerank import QwenReranker
             self.corpus_store = LanceStore(
-                REPO_ROOT / "corpus_data" / "lancedb", HarrierEmbedder())
+                REPO_ROOT / "corpus_data" / "lancedb", HarrierEmbedder(),
+                reranker=QwenReranker())  # lazy: loads on first search
             extractor = MinerUExtractor()
         # PDF fetch is arXiv-spaced too (§6 politeness covers all arXiv
         # access, not just the bibtex cascade).

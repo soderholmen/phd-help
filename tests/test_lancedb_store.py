@@ -132,3 +132,113 @@ async def test_empty_store_degrades_cleanly(store):
     assert await store.search("anything", k=5, boost_ids=set()) == []
     assert await store.doc("x") is None
     await store.remove("x")  # must not raise on a store with no table
+
+
+# -- the §6 rerank stage: cross-encoder over the fused top-50 --------------
+
+class FakeReranker:
+    """Deterministic stand-in for Qwen3-Reranker: scores come from a
+    test-supplied function, so the final order is set by the reranker,
+    not by RRF — which is exactly what these tests must show."""
+
+    def __init__(self, score=lambda q, d: 0.5, fail=False, wrong_len=False):
+        self.score = score
+        self.fail = fail
+        self.wrong_len = wrong_len
+        self.calls: list[tuple[str, list[str]]] = []
+
+    def rerank(self, query, docs):
+        self.calls.append((query, list(docs)))
+        if self.fail:
+            raise RuntimeError("reranker OOM")
+        scores = [self.score(query, d) for d in docs]
+        return scores[:-1] if self.wrong_len and scores else scores
+
+
+def rerank_store(tmp_path, reranker):
+    return LanceStore(tmp_path / "db", FakeEmbedder(), reranker=reranker)
+
+
+@pytest.mark.anyio
+async def test_reranker_reorders_beyond_rrf(tmp_path):
+    rr = FakeReranker(score=lambda q, d: 0.9 if "syrinx" in d else 0.1)
+    store = rerank_store(tmp_path, rr)
+    await store.index("attn", ATTN)
+    await store.index("bird", OTHER)
+    hits = await store.search("scaled dot product attention", k=2,
+                              boost_ids=set())
+    # RRF puts the attention chunk first; the reranker's judgement wins.
+    assert hits[0].doc_id == "bird" and hits[0].score == pytest.approx(0.9)
+
+
+@pytest.mark.anyio
+async def test_rerank_docs_carry_the_section_path(tmp_path):
+    rr = FakeReranker()
+    store = rerank_store(tmp_path, rr)
+    await store.index("attn", ATTN)
+    await store.search("attention", k=1, boost_ids=set())
+    docs = rr.calls[0][1]
+    assert any("Scaled Dot-Product Attention" in d for d in docs)
+
+
+@pytest.mark.anyio
+async def test_boost_applies_after_the_rerank(tmp_path):
+    # attn 0.6 vs bird 0.8: bird leads on merit; the pinned multiplier
+    # (0.6 * 1.5 = 0.9) flips it — boost rides the reranked scale.
+    rr = FakeReranker(
+        score=lambda q, d: 0.6 if "attention" in d.lower() else 0.8)
+    store = rerank_store(tmp_path, rr)
+    await store.index("attn", ATTN)
+    await store.index("bird", OTHER)
+    plain = await store.search("attention speech", k=4, boost_ids=set())
+    assert plain[0].doc_id == "bird"
+    boosted = await store.search("attention speech", k=4,
+                                 boost_ids={"attn"})
+    assert boosted[0].doc_id == "attn"
+    assert boosted[0].score == pytest.approx(0.6 * 1.5)
+
+
+@pytest.mark.anyio
+async def test_reranker_failure_falls_back_to_rrf_order(tmp_path):
+    # §8: a down reranker degrades the ranking, it never sinks the
+    # search — the RRF-fused order and scores must stand untouched.
+    rr = FakeReranker(fail=True)
+    store = rerank_store(tmp_path, rr)
+    await store.index("attn", ATTN)
+    await store.index("bird", OTHER)
+    hits = await store.search("scaled dot product attention", k=3,
+                              boost_ids=set())
+    store2 = LanceStore(tmp_path / "db3", FakeEmbedder())
+    await store2.index("attn", ATTN)
+    await store2.index("bird", OTHER)
+    ref = await store2.search("scaled dot product attention", k=3,
+                              boost_ids=set())
+    assert [(h.doc_id, h.block_start) for h in hits] == \
+           [(h.doc_id, h.block_start) for h in ref]
+
+
+@pytest.mark.anyio
+async def test_reranker_wrong_length_falls_back(tmp_path):
+    # A reranker returning a misaligned score list must not silently
+    # graft scores onto the wrong chunks.
+    rr = FakeReranker(score=lambda q, d: 0.9, wrong_len=True)
+    store = rerank_store(tmp_path, rr)
+    await store.index("attn", ATTN)
+    await store.index("bird", OTHER)
+    hits = await store.search("scaled dot product attention", k=2,
+                              boost_ids=set())
+    assert hits[0].doc_id == "attn"  # RRF order, not the bogus 0.9s
+
+
+@pytest.mark.anyio
+async def test_reranker_sees_the_wide_candidate_field(tmp_path):
+    # §6 reranks over top-50, not over k: with k=1 the reranker must
+    # still judge every indexed chunk (12 here), so a chunk RRF buried
+    # can still be lifted into the answer.
+    rr = FakeReranker()
+    store = rerank_store(tmp_path, rr)
+    await store.index("many", [chunk(f"topic word {i} filler text here",
+                                      page=i + 1, b0=i, b1=i)
+                               for i in range(12)])
+    await store.search("topic word filler", k=1, boost_ids=set())
+    assert len(rr.calls[0][1]) == 12

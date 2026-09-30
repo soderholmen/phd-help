@@ -1,10 +1,11 @@
 """The corpus index seam (SPEC §6).
 
 The production adapter is embedded LanceDB (Tantivy BM25 + vectors + RRF
-fusion + rerank in one library call) with the harrier embedder behind it —
-all server-side, wired when the 3090 stack is up. Until then (and in
-tests) the agent tools run against any object with this shape; a missing
-or faulting store degrades to tool errors per the §8 matrix.
+fusion in one library call, then the cross-encoder rerank stage over
+the fused top-50) with the harrier embedder behind it — all server-side,
+wired when the local stack is up. Until then (and in tests) the agent
+tools run against any object with this shape; a missing or faulting
+store degrades to tool errors per the §8 matrix.
 """
 
 from dataclasses import dataclass
@@ -37,6 +38,20 @@ class ChunkHit:
 class DocInfo:
     abstract: str
     headings: tuple[str, ...]
+
+
+class Reranker(Protocol):
+    """The §6 cross-encoder stage (Qwen3-Reranker-0.6B over top-50),
+    behind the tiny sync seam the store talks to — same shape as the
+    embedder's ``encode``.
+
+    Scores must be positive (probabilities, not margins): the pinned-doc
+    boost is a multiplier, and on a signed scale multiplying would bury
+    a pinned doc instead of lifting it."""
+
+    def rerank(self, query: str, docs: list[str]) -> list[float]:
+        """One relevance score per (query, doc) pair, in input order."""
+        ...
 
 
 class CorpusStore(Protocol):

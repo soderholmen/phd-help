@@ -2,16 +2,20 @@
 
 One global table of chunks; hybrid search is one library call — Tantivy
 BM25 + vector, RRF-fused (verified against lancedb 0.39: the working
-form is ``search(query_type="hybrid").vector(q).text(query)``). The
-pinned-doc boost rides on top of the fused score: pinned docs get a
-multiplier and the list re-sorts, so a pinned doc wins ties and near
-ties but a bad pinned doc still loses to a much better match — boosted,
-never filtered to (§6).
+form is ``search(query_type="hybrid").vector(q).text(query)``). When a
+reranker is wired (server/rerank.py), the fused top-50 goes through it
+and its scores replace the RRF ones; a reranker that faults or returns
+a misaligned score list degrades to the RRF order rather than sinking
+the search (§8). The pinned-doc boost rides on top of the final scores:
+pinned docs get a multiplier and the list re-sorts, so a pinned doc
+wins ties and near ties but a bad pinned doc still loses to a much
+better match — boosted, never filtered to (§6).
 
-The embedder is the sync ``encode`` seam (server/embed.py); every
-method here is async and offloads encoding to a worker thread. The
-table is created lazily on first index, sized to the embedder's first
-vector — an empty store searches to [] and docs to None (§8).
+The embedder and reranker are the sync seams (server/embed.py,
+server/rerank.py); every method here is async and offloads model work
+to a worker thread. The table is created lazily on first index, sized
+to the embedder's first vector — an empty store searches to [] and docs
+to None (§8).
 """
 
 import asyncio
@@ -25,6 +29,7 @@ from phd_helper.store import ChunkHit, DocInfo
 
 TABLE = "chunks"
 BOOST = 1.5
+RERANK_CANDIDATES = 50  # §6: rerank over top-50, not over k
 
 
 def _quote(value: str) -> str:
@@ -51,9 +56,10 @@ def _schema(dim: int) -> pa.Schema:
 class LanceStore:
     """CorpusStore over an embedded LanceDB directory — no server."""
 
-    def __init__(self, db_path, embedder):
+    def __init__(self, db_path, embedder, reranker=None):
         self._db = lancedb.connect(str(db_path))
         self.embedder = embedder
+        self.reranker = reranker
         self._fts_ready = False
 
     def _table(self):
@@ -107,11 +113,13 @@ class LanceStore:
             return []
         q = (await asyncio.to_thread(self.embedder.encode, [query]))[0]
         self._ensure_fts(t)
-        # Over-fetch: the boost re-sort must choose from a wide enough
-        # field that a pinned doc outside the raw top-k can still land.
+        # Over-fetch: the boost re-sort (and the rerank stage) must
+        # choose from a wide enough field that a good doc outside the
+        # raw top-k — or a pinned doc outside it — can still land.
+        limit = RERANK_CANDIDATES if self.reranker else max(k * 3, 10)
         rows = (t.search(query_type="hybrid")
-                .vector(q).text(query)
-                .limit(max(k * 3, 10)).to_list())
+                .vector(q).text(query).limit(limit).to_list())
+        rows = await self._rerank(query, rows)
         for r in rows:
             if r["doc_id"] in boost_ids:
                 r["_relevance_score"] *= BOOST
@@ -125,6 +133,30 @@ class LanceStore:
                          kind=r["kind"],
                          score=float(r["_relevance_score"]))
                 for r in rows[:k]]
+
+    async def _rerank(self, query: str, rows: list[dict]) -> list[dict]:
+        """Re-score the fused candidates with the cross-encoder, in
+        place on the score field (§6). The doc text carries the section
+        path — the same heading context the embedder saw, and what lets
+        the reranker tell two chunks with shared prose apart.
+
+        Degrades, never sinks (§8): a faulting reranker or one whose
+        scores don't line up with the candidates leaves the RRF order
+        untouched — a misaligned score list would graft scores onto the
+        wrong chunks, which is worse than no rerank at all."""
+        if self.reranker is None or not rows:
+            return rows
+        docs = [f"{r['section_path']}\n{r['text']}" for r in rows]
+        try:
+            scores = await asyncio.to_thread(self.reranker.rerank,
+                                            query, docs)
+        except Exception:
+            return rows
+        if len(scores) != len(rows):
+            return rows
+        for r, s in zip(rows, scores):
+            r["_relevance_score"] = float(s)
+        return rows
 
     async def doc(self, doc_id: str) -> DocInfo | None:
         t = self._table()
