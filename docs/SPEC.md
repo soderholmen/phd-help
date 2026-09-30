@@ -153,7 +153,7 @@ A dedicated fast transformation (fixed-format task, fast sampling config) turns 
 ### Corpus pipeline (all server-side, on the 3090)
 
 - **Two doors, one pipeline**: web-UI upload + agent-fetched PDFs. **No drop folder.** Async indexing with visible per-PDF status (queued / extracting / indexed / failed); papers from search with an openly downloadable PDF **auto-join** the corpus; paywalled papers get a bib entry only. Dedup by content hash; a new arXiv version of an owned paper is re-fetched on request, not tracked automatically.
-- **Extraction**: MinerU 4.0 standard tier (stable page/block citation locators). Quality ceiling if ever needed: Chandra 2 served on the server.
+- **Extraction**: MinerU 4.0 standard tier (page/block citation locators). Figure locators are MinerU's real `page:N/block:M`; text/table/equation/heading blocks carry a synthesized page-local block id (1-based, reset per page) — stable against a reparse of a single page, not against a re-segmentation of one. Quality ceiling if ever needed: Chandra 2 served on the server.
 - **Chunking**: section-aware on MinerU's block tree; heading-path prefix prepended (`paper title » section`); tables/figures as standalone chunks; ~512–1024 token cap.
 - **Embeddings**: harrier-oss-v1-0.6b (MIT); upgrade path harrier-oss-v1-27b or Qwen3-Embedding-8B served on the server.
 - **Store**: embedded **LanceDB** — Tantivy FTS (BM25) + vector + RRF fusion in one library call, no server; rerank (Qwen3-Reranker-0.6B over the fused top-50) rides as a second stage on the store side, since LanceDB has no native reranker. Brute-force vectors are fine at this scale (~10⁵ chunks).
