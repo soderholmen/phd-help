@@ -158,10 +158,12 @@ async def execute_async(call, project: Project, resolve=resolve_bibtex,
             # corpus (arXiv ids are the open path; paywalled hits get a
             # bib entry only). Best-effort — a dead fetch never sinks the
             # search result the model is waiting on.
-            ids = [h.arxiv for h in hits if h.arxiv]
-            if ids:
+            open_hits = [h for h in hits if h.arxiv]
+            if open_hits:
+                # The hits ride along whole: auto-join needs the title
+                # for §6's embed prefix, not just the id.
                 try:
-                    await autojoin(ids)
+                    await autojoin(open_hits)
                 except Exception:
                     pass
         return {"results": [{"n": i, "title": h.title,

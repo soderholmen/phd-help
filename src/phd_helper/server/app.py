@@ -192,13 +192,16 @@ def spawn_ingest(state, doc_id: str) -> None:
     # not runnable: the doc stays queued — paused, visible (§8)
 
 
-async def autojoin(state, arxiv_ids: list[str]) -> None:
+async def autojoin(state, hits) -> None:
     """§6: search hits with an openly downloadable PDF auto-join the
-    corpus. Fire-and-forget: the agent's turn never waits on indexing."""
+    corpus, carrying the title/year the search already returned (§6's
+    embed prefix is `paper title » section`). Fire-and-forget: the
+    agent's turn never waits on indexing."""
     if state.ingestor is None or not state.ingestor.runnable():
         return
-    for aid in arxiv_ids:
-        spawn(state, state.ingestor.fetch_arxiv(aid))
+    for h in hits:
+        spawn(state, state.ingestor.fetch_arxiv(h.arxiv, title=h.title,
+                                                year=h.year))
 
 
 def create_app(state: "AppState | None" = None) -> FastAPI:

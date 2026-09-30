@@ -82,15 +82,19 @@ class Ingestor:
             if rec.status == "queued":
                 await self.ingest(rec.doc_id)
 
-    async def fetch_arxiv(self, arxiv_id: str) -> DocRecord:
+    async def fetch_arxiv(self, arxiv_id: str, *, title: str = "",
+                          year: str = "") -> DocRecord:
         """Door 2 (agent fetch / search auto-join): fetch the PDF, then the
         shared pipeline. A dead or paywalled link raises — those papers
-        get a bib entry only, never a half-registered corpus doc."""
+        get a bib entry only, never a half-registered corpus doc. The
+        caller's title/year ride along: §6's embed prefix is
+        `paper title » section`, and the search hit already has it."""
         owned = self.corpus.find_arxiv(arxiv_id)
         if owned is not None:
             return owned  # auto-join re-hit: no re-download (§6 budget)
         pdf = await self.fetch_pdf(f"https://arxiv.org/pdf/{arxiv_id}")
-        rec, new = self.corpus.add_pdf(pdf, arxiv=arxiv_id, source="agent")
+        rec, new = self.corpus.add_pdf(pdf, arxiv=arxiv_id, title=title,
+                                       year=year, source="agent")
         if new:
             await self.ingest(rec.doc_id)
         return rec

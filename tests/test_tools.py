@@ -204,8 +204,8 @@ async def test_web_search_without_a_fetcher_bounces(paper):
 async def test_web_search_auto_joins_arxiv_hits(paper):
     joined = []
 
-    async def autojoin(arxiv_ids):
-        joined.append(arxiv_ids)
+    async def autojoin(open_hits):
+        joined.append(open_hits)
 
     hits = [PaperHit(title="Mesh Anything", authors=(), year="2024",
                      arxiv="2401.00002", doi="", venue="arXiv",
@@ -216,13 +216,16 @@ async def test_web_search_auto_joins_arxiv_hits(paper):
     result = await execute_async(
         call("web_search", {"query": "mesh anything"}), paper,
         search=fake_search(hits), autojoin=autojoin)
-    assert joined == [["2401.00002"]]  # arXiv PDFs only; paywalled stays bib-only
+    # arXiv PDFs only; paywalled stays bib-only. Whole hits ride along so
+    # the corpus gets the real title, not "Untitled" (§6 embed prefix).
+    assert [[h.arxiv for h in batch] for batch in joined] == [["2401.00002"]]
+    assert joined[0][0].title == "Mesh Anything"
     assert len(result["results"]) == 2  # the search result stands regardless
 
 
 @pytest.mark.anyio
 async def test_autojoin_failure_never_sinks_the_search_result(paper):
-    async def autojoin(arxiv_ids):
+    async def autojoin(open_hits):
         raise RuntimeError("server offline")
     result = await execute_async(
         call("web_search", {"query": "mesh anything"}), paper,
