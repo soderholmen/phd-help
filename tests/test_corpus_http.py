@@ -44,12 +44,14 @@ class FakeHttp:
 
 def make_env(tmp_path, extractor=None, store=None):
     corpus = Corpus(tmp_path / "corpus")
-    extractor = extractor or FakeExtractor()
+    extractor = extractor if extractor is not None else FakeExtractor()
     store = store if store is not None else FakeStore()
     ingestor = Ingestor(corpus, extractor, store)
     state = SimpleNamespace(http=FakeHttp(), corpus=corpus,
                             corpus_store=store, ingestor=ingestor,
-                            ingest_tasks=set())
+                            ingest_tasks=set(),
+                            project=SimpleNamespace(
+                                root=tmp_path / "my-paper"))
     return state, TestClient(create_app(state=state))
 
 
@@ -118,6 +120,29 @@ def test_failure_is_visible_and_retry_lands(tmp_path):
         r = client.post(f"/corpus/{body['doc_id']}/retry")
         assert r.status_code == 200
         settle(client, body["doc_id"], want="indexed")
+
+
+def test_pin_attaches_doc_to_active_project(tmp_path):
+    _, client = make_env(tmp_path)
+    with client:
+        doc_id = client.post("/corpus/upload", content=b"x").json()["doc_id"]
+        r = client.post(f"/corpus/{doc_id}/pin")
+        assert r.status_code == 200
+        assert r.json()["pinned_in"] == ["my-paper"]  # the active project
+        docs = client.get("/corpus/docs").json()
+        assert next(d for d in docs if d["doc_id"] == doc_id)["pinned_in"] \
+            == ["my-paper"]
+        # idempotent
+        assert client.post(f"/corpus/{doc_id}/pin").json()["pinned_in"] \
+            == ["my-paper"]
+        r = client.post(f"/corpus/{doc_id}/unpin")
+        assert r.json()["pinned_in"] == []
+
+
+def test_pin_unknown_doc_is_a_409(tmp_path):
+    _, client = make_env(tmp_path)
+    with client:
+        assert client.post("/corpus/nosuchdoc/pin").status_code == 409
 
 
 def test_retry_only_for_failed_docs(tmp_path):

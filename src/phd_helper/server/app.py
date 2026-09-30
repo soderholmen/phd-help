@@ -261,6 +261,25 @@ def create_app(state: "AppState | None" = None) -> FastAPI:
         spawn_ingest(state, doc_id)
         return {"doc_id": doc_id, "status": rec.status}
 
+    # Pins attach a doc to the active project (§5/§6): the boost the
+    # agent's boost_pinned rides on. The UI's pin button is this door.
+
+    @app.post("/corpus/{doc_id}/pin")
+    async def corpus_pin(doc_id: str):
+        try:
+            state.corpus.pin(doc_id, state.project.root.name)
+        except CorpusError as e:
+            return JSONResponse({"error": str(e)}, status_code=409)
+        return {"doc_id": doc_id,
+                "pinned_in": list(state.corpus.get(doc_id).pinned_in)}
+
+    @app.post("/corpus/{doc_id}/unpin")
+    async def corpus_unpin(doc_id: str):
+        state.corpus.unpin(doc_id, state.project.root.name)
+        rec = state.corpus.get(doc_id)
+        return {"doc_id": doc_id,
+                "pinned_in": list(rec.pinned_in) if rec else []}
+
     @app.websocket("/ws/voice")
     async def voice(ws: WebSocket):
         await ws.accept()
