@@ -10,7 +10,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit
 
 from phd_helper.bibtex import BibEntry, invert_name, make_key, parse_entry
 
@@ -39,6 +39,13 @@ class ResolveResult:
     tried: tuple[str, ...] = ()
 
 
+def _is_arxiv(url: str) -> bool:
+    """Host test, not substring: a query mentioning "arxiv.org" must not
+    make an OpenAlex URL look like an arXiv request."""
+    host = urlsplit(url).hostname or ""
+    return host == "arxiv.org" or host.endswith(".arxiv.org")
+
+
 class ArxivRateLimited:
     """arXiv politeness (SPEC §6): one request per 3 s, single connection.
 
@@ -56,7 +63,7 @@ class ArxivRateLimited:
         self._lock = asyncio.Lock()
 
     async def __call__(self, url, headers=None):
-        if "arxiv.org" not in url:
+        if not _is_arxiv(url):
             return await self._fetch(url, headers)
         async with self._lock:  # single connection: serialize arxiv requests
             if self._last is not None:

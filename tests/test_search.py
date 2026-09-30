@@ -1,6 +1,7 @@
-"""Academic-first discovery (SPEC §6): OpenAlex /works?search= primary,
-arXiv API fallback. Fake-HTTP seam like the cascade — tests assert the
-recorded fetch calls and the parsed hits, no real network.
+"""Academic-first discovery (SPEC §6): arXiv ti:"..." title search and
+OpenAlex search= always run and merge, arXiv leading. Fake-HTTP seam like
+the cascade — tests assert the recorded fetch calls and the parsed hits,
+no real network.
 """
 
 import json
@@ -137,3 +138,49 @@ async def test_unparseable_and_failed_bodies_yield_no_hits_not_a_crash():
                             Response(0, "ConnectError: no route"))
     assert await search_papers("anything", fetch) == []
     assert len(calls) == 2  # both sources tried, neither raised
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("body", ["[]", '{"results": null}',
+                                  '{"results": 5}'])
+async def test_valid_json_of_the_wrong_shape_is_a_miss_not_a_crash(body):
+    # A proxy returning 200-with-JSON-but-not-the-contract must not kill
+    # the turn any more than HTML would (review 97ea4d0 finding 2).
+    fetch, calls = recorder(Response(200, body), Response(200, body))
+    assert await search_papers("anything", fetch) == []
+
+
+@pytest.mark.anyio
+async def test_old_format_ids_dedupe_case_insensitively():
+    # OpenAlex lowercases the id inside its arXiv DOI; arXiv's Atom keeps
+    # the original case — the same paper must not take two candidate
+    # slots when the titles also differ (revised versions).
+    oa = json.dumps({"results": [{
+        "display_name": "A Revised Title", "publication_year": 2004,
+        "doi": "https://doi.org/10.48550/arxiv.math.gt/0309136",
+        "authorships": [{"author": {"display_name": "Some Author"}}],
+        "primary_location": None}]})
+    atom = ('<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">'
+            '<entry><id>http://arxiv.org/abs/math.GT/0309136v1</id>'
+            '<title>Original Title</title>'
+            '<published>2003-09-01T00:00:00Z</published>'
+            '<author><name>Some Author</name></author></entry></feed>')
+    fetch, calls = recorder(Response(200, oa), Response(200, atom))
+    hits = await search_papers("original title", fetch)
+    assert len(hits) == 1
+    assert hits[0].arxiv == "math.GT/0309136"  # arXiv's own casing wins
+
+
+@pytest.mark.anyio
+async def test_arxiv_doi_element_is_carried_into_the_hit():
+    atom = ('<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom" '
+            'xmlns:arxiv="http://arxiv.org/schemas/atom">'
+            '<entry><id>http://arxiv.org/abs/1706.03762v7</id>'
+            '<title>Attention Is All You Need</title>'
+            '<published>2017-06-12T00:00:00Z</published>'
+            '<arxiv:doi>10.48550/arXiv.1706.03762</arxiv:doi>'
+            '<author><name>Ashish Vaswani</name></author></entry></feed>')
+    fetch, calls = recorder(Response(200, '{"results": []}'),
+                            Response(200, atom))
+    hits = await search_papers("attention", fetch)
+    assert hits[0].doi == "10.48550/arXiv.1706.03762"

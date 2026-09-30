@@ -12,8 +12,26 @@ def call(name, arguments, cid="c1"):
             "function": {"name": name, "arguments": arguments}}
 
 
-OFFERED = {"section_read": ["section"],
-           "section_write": ["section", "find", "replace"]}
+OFFERED = {"section_read": {"section": "string"},
+           "section_write": {"section": "string", "find": "string",
+                             "replace": "string"}}
+
+
+def test_wrongly_typed_param_rejected_with_a_bounce():
+    # {"query": 5} must bounce to the model, not reach the tool and raise
+    # out of the turn (review 97ea4d0: silent turn death).
+    valid, errors = validate_tool_calls(
+        [call("section_read", '{"section": 5}')], OFFERED)
+    assert valid == []
+    assert len(errors) == 1
+    assert "section" in errors[0] and "string" in errors[0]
+
+
+def test_null_param_rejected():
+    valid, errors = validate_tool_calls(
+        [call("section_read", '{"section": null}')], OFFERED)
+    assert valid == []
+    assert len(errors) == 1
 
 
 def test_valid_call_passes_through():

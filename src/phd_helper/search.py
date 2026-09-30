@@ -54,7 +54,7 @@ def _merge(primary: list[PaperHit], secondary: list[PaperHit],
     ids: set[str] = set()
     pairs: set[tuple[str, str]] = set()
     for h in [*primary, *secondary]:
-        if h.arxiv and f"a:{h.arxiv}" in ids:
+        if h.arxiv and f"a:{h.arxiv.lower()}" in ids:
             continue
         if h.doi and f"d:{h.doi.lower()}" in ids:
             continue
@@ -62,7 +62,7 @@ def _merge(primary: list[PaperHit], secondary: list[PaperHit],
         if pair in pairs:
             continue
         if h.arxiv:
-            ids.add(f"a:{h.arxiv}")
+            ids.add(f"a:{h.arxiv.lower()}")
         if h.doi:
             ids.add(f"d:{h.doi.lower()}")
         pairs.add(pair)
@@ -71,6 +71,7 @@ def _merge(primary: list[PaperHit], secondary: list[PaperHit],
 
 
 ATOM = "{http://www.w3.org/2005/Atom}"
+ARXIV_NS = "{http://arxiv.org/schemas/atom}"
 
 
 def _from_arxiv(resp: Response) -> list[PaperHit]:
@@ -92,8 +93,9 @@ def _from_arxiv(resp: Response) -> list[PaperHit]:
                              for a in entry.findall(f"{ATOM}author"))
                 if name.strip())
             published = entry.findtext(f"{ATOM}published") or ""
+            doi = (entry.findtext(f"{ARXIV_NS}doi") or "").strip()
             hits.append(PaperHit(title=title, authors=authors,
-                                 year=published[:4], arxiv=arxiv, doi="",
+                                 year=published[:4], arxiv=arxiv, doi=doi,
                                  venue="arXiv", source="arxiv"))
         except (AttributeError, TypeError):  # one malformed entry, not all
             continue
@@ -102,8 +104,10 @@ def _from_arxiv(resp: Response) -> list[PaperHit]:
 
 def _from_openalex(resp: Response) -> list[PaperHit]:
     try:
-        works = json.loads(resp.body).get("results", [])
-    except ValueError:
+        works = json.loads(resp.body).get("results") or []
+    except (AttributeError, TypeError, ValueError):
+        return []  # valid JSON of the wrong shape is a miss, not a crash
+    if not isinstance(works, list):
         return []
     hits: list[PaperHit] = []
     for w in works:

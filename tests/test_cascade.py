@@ -159,6 +159,23 @@ async def test_arxiv_no_sleep_once_the_gap_already_elapsed():
 
 
 @pytest.mark.anyio
+async def test_only_arxiv_hosts_are_spaced_not_urls_mentioning_arxiv():
+    # quote_plus leaves dots bare, so a query like "what is arxiv.org"
+    # puts the substring inside an OpenAlex URL — spacing is by host.
+    fetch, calls = recorder(Response(200, "{}"), Response(200, ARXIV_BIB))
+    slept = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+
+    now = [0.0]
+    polite = ArxivRateLimited(fetch, sleep=sleep, clock=lambda: now[0])
+    await polite("https://api.openalex.org/works?search=what+is+arxiv.org")
+    await polite("http://export.arxiv.org/api/query?search_query=ti%3Ax")
+    assert slept == []  # first call was not arXiv; second is the first
+
+
+@pytest.mark.anyio
 async def test_concurrent_arxiv_requests_never_overlap():
     in_flight: list[str] = []
     peak: list[int] = []

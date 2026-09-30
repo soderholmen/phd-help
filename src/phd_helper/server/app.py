@@ -113,6 +113,11 @@ class Session:
             # vLLM down, backend up: error inline in chat (§8 matrix).
             await self.send({"type": "error", "where": "llm",
                              "message": str(e)})
+        except Exception as e:
+            # Last line: no bug anywhere in a tool may silently kill the
+            # fire-and-forget turn task — the client always hears back.
+            await self.send({"type": "error", "where": "turn",
+                             "message": f"unexpected error: {e}"})
 
     def cancel_turn(self):
         if self.turn_task is not None and not self.turn_task.done():

@@ -39,8 +39,11 @@ def test_schemas_are_openai_strict():
 def test_offered_matches_schemas():
     assert set(OFFERED) == {s["function"]["name"] for s in TOOL_SCHEMAS}
     for s in TOOL_SCHEMAS:
-        assert OFFERED[s["function"]["name"]] == \
-            s["function"]["parameters"]["required"]
+        params = s["function"]["parameters"]
+        offered = OFFERED[s["function"]["name"]]
+        assert set(offered) == set(params["required"])
+        assert all(offered[p] == params["properties"][p]["type"]
+                   for p in params["required"])
 
 
 def test_validator_passes_present_anchor(paper):

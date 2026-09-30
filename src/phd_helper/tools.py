@@ -83,8 +83,12 @@ TOOL_SCHEMAS = [
             "additionalProperties": False}}},
 ]
 
-OFFERED = {s["function"]["name"]: s["function"]["parameters"]["required"]
-           for s in TOOL_SCHEMAS}
+# name -> {required param: json type} — validate_tool_calls checks both
+# presence and type, so a {"query": 5} bounces instead of killing the turn.
+OFFERED = {s["function"]["name"]: {
+    p: s["function"]["parameters"]["properties"][p]["type"]
+    for p in s["function"]["parameters"]["required"]}
+    for s in TOOL_SCHEMAS}
 
 
 def make_validators(project: Project) -> dict:

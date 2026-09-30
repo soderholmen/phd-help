@@ -20,10 +20,16 @@ class ValidCall:
     args: dict
 
 
+_JSON_TYPES = {"string": str, "integer": int, "number": (int, float),
+               "boolean": bool, "object": dict, "array": list}
+
+
 def validate_tool_calls(calls, offered, validators=None):
     """Validate raw OpenAI-style tool calls against the offered contract.
 
-    ``offered`` maps tool name -> required parameter names.
+    ``offered`` maps tool name -> {param: json-type} for its required
+    params — presence AND type are checked, so a wrongly-typed argument
+    bounces to the model instead of raising inside the tool.
     ``validators`` optionally maps tool name -> callable(args) -> error
     message or None. Returns ``(valid, errors)`` where ``errors`` holds one
     bounce-back message per rejected call.
@@ -52,6 +58,14 @@ def validate_tool_calls(calls, offered, validators=None):
         if missing:
             errors.append(f"tool '{name}' is missing required "
                           f"parameter(s): {', '.join(missing)}")
+            continue
+        bad = [(p, offered[name][p]) for p in offered[name]
+               if not isinstance(args[p],
+                                 _JSON_TYPES.get(offered[name][p], object))]
+        if bad:
+            errors.append(f"tool '{name}': " + "; ".join(
+                f"parameter '{p}' must be {t}, got "
+                f"{type(args[p]).__name__}" for p, t in bad))
             continue
         check = validators.get(name)
         if check is not None:
