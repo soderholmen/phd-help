@@ -410,3 +410,77 @@ async def test_spawn_gist_refresh_is_one_at_a_time(tmp_path):
     spawn_gist_refresh(state)
     assert state.gist_task is first  # still running: no second pass
     await first
+
+
+# -- paper memory wiring (SPEC §4/§7) ----------------------------------------
+
+
+@pytest.mark.anyio
+async def test_paper_memory_rides_the_context(tmp_path):
+    state, session = make_env(tmp_path, store=DocStore())
+    state.project.save_memory("- Decided: harrier for embeddings")
+    await session.run_turn("hello")
+    assert "harrier for embeddings" in sent_text(session)
+
+
+@pytest.mark.anyio
+async def test_memory_survives_the_drop_tiers(tmp_path):
+    # §4: memory is never-droppable — a hopeless budget still keeps it.
+    state, session = make_env(tmp_path, store=DocStore(), budget=1)
+    state.project.save_memory("- The one decision that must survive")
+    await session.run_turn("hello")
+    assert "The one decision that must survive" in sent_text(session)
+
+
+class MemoryLlm:
+    """Chat seam for distillation: returns a markdown memory file."""
+
+    def __init__(self):
+        self.prompts = []
+
+    async def chat(self, messages, **kwargs):
+        self.prompts.append(messages[-1]["content"])
+        text = "# Decisions\n- harrier for embeddings\n"
+        return {"role": "assistant", "content": text}, [], text
+
+
+@pytest.mark.anyio
+async def test_distill_folds_the_session_into_memory(tmp_path):
+    from phd_helper.server.app import distill_memory
+    llm = MemoryLlm()
+    state = gist_env(tmp_path, llm)
+    await distill_memory(state, [
+        {"role": "user", "content": "we decided on harrier"},
+        {"role": "assistant", "content": "noted"}])
+    assert state.project.load_memory() == "# Decisions\n- harrier for embeddings"
+    assert "we decided on harrier" in llm.prompts[0]  # transcript rides
+    assert "(empty)" in llm.prompts[0]  # old memory is offered to merge
+
+
+@pytest.mark.anyio
+async def test_distill_skips_empty_sittings_and_llm_faults(tmp_path):
+    from phd_helper.server.app import distill_memory
+    state = gist_env(tmp_path, GistLlm())
+    await distill_memory(state, [{"role": "system", "content": "x"}])
+    assert state.project.load_memory() == ""  # nothing to distill
+    state2 = gist_env(tmp_path / "b", GistLlm(fail_after=0))
+    await distill_memory(state2, [{"role": "user", "content": "hi"}])
+    assert state2.project.load_memory() == ""  # fault: skip, no raise
+
+
+@pytest.mark.anyio
+async def test_disconnect_distills_the_sitting(tmp_path):
+    import asyncio
+    state, _ = make_env(tmp_path)
+    state.endpoint = VoiceEndpoint(ping_interval=2.0, lease_timeout=60.0)
+    state.stt = StubStt()
+    state.http = FakeHttp()
+    state.ingestor = None
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "typed", "text": "hello there"})
+            assert ws.receive_json()["type"] == "turn_started"
+    await asyncio.gather(*state.ingest_tasks)  # the distill task
+    # RecordingLlm answers "ok" — that became the distilled memory.
+    assert state.project.load_memory() == "ok"

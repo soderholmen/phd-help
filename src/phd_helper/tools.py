@@ -116,6 +116,21 @@ TOOL_SCHEMAS = [
                             "description": "Replacement text"}},
             "required": ["section", "find", "replace"],
             "additionalProperties": False}}},
+    {"type": "function", "function": {
+        "name": "memory_write",
+        "description": "Replace the paper memory file: the persistent "
+                       "decisions, claims, terminology and TODOs that "
+                       "must survive across sessions. The current memory "
+                       "rides your context — merge this session into it; "
+                       "remove only what was explicitly decided away.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string",
+                            "description": "The full new memory file, "
+                                           "markdown"}},
+            "required": ["content"],
+            "additionalProperties": False}}},
 ]
 
 # name -> {required param: json type} — validate_tool_calls checks both
@@ -215,6 +230,11 @@ def execute(call, project: Project) -> dict:
         except OSError:
             return {"error": f"section '{call.args['section']}' "
                              "does not exist"}
+    if call.name == "memory_write":
+        # Agent state under .phd-helper/, not a paper file: no §5
+        # approval gate — the §4 side panel is the user's edit surface.
+        project.save_memory(call.args["content"])
+        return {"status": "written", "chars": len(call.args["content"])}
     if call.name == "section_write":
         try:
             diff = project.propose_patch(call.args["section"],

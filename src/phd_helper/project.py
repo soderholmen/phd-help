@@ -59,6 +59,24 @@ class Project:
     def read_section(self, path: str) -> str:
         return (self.root / path).read_text(encoding="utf-8")
 
+    # -- paper memory (SPEC §4) ---------------------------------------------
+
+    def load_memory(self) -> str:
+        """The persistent decisions/claims/terminology/TODOs file; a
+        project that never distilled one reads as empty."""
+        try:
+            return (self.state_dir / "memory.md").read_text(
+                encoding="utf-8")
+        except OSError:
+            return ""
+
+    def save_memory(self, text: str) -> None:
+        # Not a paper file: memory is agent state under .phd-helper/,
+        # so it skips the §5 pending-diff approval path (the §4 side
+        # panel is the user's edit surface).
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        (self.state_dir / "memory.md").write_text(text, encoding="utf-8")
+
     # -- gist cache (SPEC §4) -----------------------------------------------
 
     def load_gists(self) -> dict:

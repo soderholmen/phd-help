@@ -102,10 +102,13 @@ class Session:
                                      skip=self.selected or "")
         if stale_sections(tree, project.files(), gist_cache):
             spawn_gist_refresh(self.state)
+        # §4 paper memory: never drops, rides every turn once distilled.
+        raw_memory = project.load_memory()
         exchanges = _group_exchanges(self.history[1:])
         inputs = ContextInputs(
             section=section, skeleton=project.skeleton(),
-            memory="", distant_gists=distant_gists, rolling_summary="",
+            memory=f"Paper memory:\n{raw_memory}" if raw_memory else "",
+            distant_gists=distant_gists, rolling_summary="",
             turns=tuple(Turn("user", text) for text, _ in exchanges),
             pinned=pinned)
         ctx = assemble_context(
@@ -312,6 +315,42 @@ def spawn_gist_refresh(state) -> None:
     state.gist_task = spawn(state, refresh_gists(state))
 
 
+MEMORY_PROMPT = (
+    "You maintain the paper's memory file: the decisions, claims, "
+    "terminology and TODOs a co-writer must not lose between sessions. "
+    "Rewrite the file to fold in this session's conversation: add what "
+    "was decided, remove only what was explicitly decided away, keep it "
+    "under ~300 words of markdown bullets under Decisions / Claims / "
+    "Terminology / TODOs. Reply with the file content only.")
+MEMORY_TRANSCRIPT_CAP = 12000  # chars of transcript sent to the model
+
+
+async def distill_memory(state, conversation) -> None:
+    """§4/§7: fold a finished sitting into paper memory. A fault skips
+    the distillation — memory is polish, never an error to surface (§8);
+    the next session end retries. The voice door is the memory_write
+    tool; this is the session-end door."""
+    transcript = "\n".join(
+        f"{m['role']}: {m['content']}"
+        for m in conversation
+        if m.get("role") in ("user", "assistant") and m.get("content"))
+    if not transcript.strip():
+        return  # an empty sitting has nothing to distill
+    old = state.project.load_memory()
+    try:
+        _, _, text = await state.llm.chat(
+            [{"role": "system", "content": MEMORY_PROMPT},
+             {"role": "user",
+              "content": f"Current memory:\n{old or '(empty)'}\n\n"
+                         f"Session transcript:\n{transcript[:MEMORY_TRANSCRIPT_CAP]}"}],
+            thinking=False, max_tokens=900)
+    except Exception:
+        return  # vLLM down at disconnect: skip, retry next session end
+    text = (text or "").strip()
+    if text:
+        state.project.save_memory(text)
+
+
 def _group_exchanges(messages: list[dict]) -> list[tuple[str, list[dict]]]:
     """Partition the conversation log into exchanges: a user message opens
     one, everything until the next user message belongs to it (assistant
@@ -492,6 +531,10 @@ def create_app(state: "AppState | None" = None) -> FastAPI:
         finally:
             session.cancel_turn()
             session.ws = None
+            # §7: the sitting ends here until the web shell owns session
+            # semantics (project switch, 30-min idle) — distill memory in
+            # the background; a tab refresh just folds a shorter sitting.
+            spawn(state, distill_memory(state, session.history[1:]))
 
     async def dispatch(session: Session, msg: dict):
         now = time.monotonic()

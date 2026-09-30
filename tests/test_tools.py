@@ -427,3 +427,17 @@ async def test_corpus_doc_down_degrades(paper, corpus):
     result = await execute_async(call("corpus_doc", {"doc_id": "x"}),
                                  paper, corpus=corpus, store=None)
     assert "web_search" in result["error"]
+
+
+# -- memory_write (SPEC §4 voice door) ---------------------------------------
+
+
+def test_memory_write_replaces_the_memory_file(paper):
+    result = execute(call("memory_write", {"content":
+                                           "# Decisions\n- harrier"}), paper)
+    assert result == {"status": "written", "chars": len("# Decisions\n- harrier")}
+    assert paper.load_memory() == "# Decisions\n- harrier"
+
+
+def test_memory_write_is_offered_with_content_required():
+    assert OFFERED["memory_write"] == {"content": "string"}

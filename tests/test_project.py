@@ -116,3 +116,18 @@ def test_pending_survives_reopen(tmp_path, paper):
     pend = reopened.list_pending("sections/intro.tex")
     assert len(pend) == 1
     assert pend[0].patch.replace == "It achieves SOTA."
+
+
+# -- paper memory (SPEC §4) --------------------------------------------------
+
+
+def test_memory_round_trips_through_the_state_dir(paper):
+    assert paper.load_memory() == ""  # never distilled: empty, not missing
+    paper.save_memory("- Decided: harrier for embeddings")
+    assert paper.load_memory() == "- Decided: harrier for embeddings"
+
+
+def test_memory_lives_under_phd_helper_not_the_paper_tree(paper):
+    paper.save_memory("x")
+    assert (paper.root / ".phd-helper" / "memory.md").exists()
+    assert "memory.md" not in paper.files()  # agent state, not a .tex file
