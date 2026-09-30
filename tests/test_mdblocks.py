@@ -42,10 +42,11 @@ def test_headings_carry_levels():
 
 
 def test_block_ids_are_page_local_and_reset_per_page():
-    # §6: locators must be stable against the PDF, not against this
-    # exact extraction — a document-wide counter lets a reparse of
-    # page 2 shift every block id after it. Page-local ids (1-based,
-    # matching MinerU's own convention) keep the blast radius one page.
+    # §6: synthesized ids are stable against a reparse of a single
+    # page, not against a re-segmentation of one — a document-wide
+    # counter lets a reparse of page 2 shift every block id after it.
+    # Page-local ids (1-based, matching MinerU's own convention) keep
+    # the blast radius one page.
     blocks = markdown_to_blocks(DOC)
     p1 = [b for b in blocks if b.page == 1]
     p2 = [b for b in blocks if b.page == 2]

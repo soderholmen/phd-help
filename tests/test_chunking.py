@@ -1,6 +1,6 @@
 """Section-aware chunking (SPEC §6) on MinerU's block tree: heading-path
 prefix on the embedded text, tables/figures as standalone chunks, a token
-cap, and stable page/block locators. Pure function — tests feed literal
+cap, and page/block locators. Pure function — tests feed literal
 block trees shaped from MinerU's model.json, no extraction involved.
 """
 

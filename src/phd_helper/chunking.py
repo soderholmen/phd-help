@@ -5,8 +5,9 @@ maps MinerU 4.0's markdown onto this via mdblocks; chunking itself is
 pure and testable). Rules from §6: split on section headings, prepend
 the heading path
 (``paper title » section``) to the *embedded* text only, tables/figures
-as standalone chunks, ~512-1024 token cap, and stable page/block
-locators so the agent can say "§3.2 of the parakeet paper" precisely.
+as standalone chunks, ~512-1024 token cap, and page/block locators
+(§6: figures carry MinerU's real ids, the rest a synthesized page-local
+counter) so the agent can say "§3.2 of the parakeet paper" precisely.
 
 The token count is a deterministic char/4 heuristic — no tokenizer
 dependency in the pure core; the cap is a soft ceiling either way.

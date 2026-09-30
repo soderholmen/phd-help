@@ -7,8 +7,9 @@ tables or one-line raw HTML; display math as ``$$`` fences. This maps
 that onto the chunker's Block vocabulary. Block ids are **page-local**
 (1-based, reset at each page marker — MinerU's own convention): a
 document-wide counter would shift every id after it whenever a reparse
-segments one page differently, which is exactly what §6's "stable
-page/block citation locators" exists to prevent. Figures carry
+segments one page differently; §6's rule — stable against a reparse of
+a single page, not against a re-segmentation of one — keeps that blast
+radius to the page. Figures carry
 MinerU's real ``page:N/block:M`` from their asset URL; the rest take
 the next free id on their page.
 """
@@ -52,7 +53,10 @@ def markdown_to_blocks(md: str) -> list[Block]:
             return
         b = block if block is not None else next_block
         # A figure's real id is claimed, not counted: the counter skips
-        # past it so no two blocks on a page ever share a locator id.
+        # past it so a later synthesized id can't reuse a figure's real
+        # one. The reserve only reaches forward — MinerU's real ids
+        # increase in document order, and the parser merges more than
+        # it splits, so the counter lags them, never overtakes.
         next_block = max(next_block, b) + 1
         blocks.append(Block(kind, text,
                             at_page if at_page is not None else page,
