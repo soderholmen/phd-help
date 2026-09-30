@@ -91,10 +91,30 @@ class Ingestor:
         `paper title » section`, and the search hit already has it."""
         owned = self.corpus.find_arxiv(arxiv_id)
         if owned is not None:
-            return owned  # auto-join re-hit: no re-download (§6 budget)
+            # auto-join re-hit: no re-download (§6 budget), and a doc
+            # stuck `failed` is re-driven rather than silently no-op'd.
+            return await self._redrive_failed(owned)
         pdf = await self.fetch_pdf(f"https://arxiv.org/pdf/{arxiv_id}")
         rec, new = self.corpus.add_pdf(pdf, arxiv=arxiv_id, title=title,
                                        year=year, source="agent")
         if new:
             await self.ingest(rec.doc_id)
-        return rec
+            return rec
+        return await self._redrive_failed(rec)  # sha-dedup onto an old doc
+
+    async def _redrive_failed(self, rec: DocRecord) -> DocRecord:
+        """§8: failures are visible, not rot. An auto-join re-hit on a
+        `failed` doc re-drives it — the PDF is already on disk, the
+        download was paid for, and a transient fault (MinerU crash, store
+        hiccup) would otherwise leave the paper unsearchable forever with
+        nothing surfacing it. A deterministic failure just fails again,
+        error and all. A concurrent claim (retry button, another re-hit)
+        wins quietly: whoever moves it out of `failed` first owns it."""
+        if rec.status != "failed" or not self.runnable():
+            return rec  # not the dead state, or nothing to drive it with
+        try:
+            rec = self.corpus.retry(rec.doc_id)
+        except CorpusError:
+            return self.corpus.get(rec.doc_id) or rec  # claimed underneath us
+        await self.ingest(rec.doc_id)
+        return self.corpus.get(rec.doc_id) or rec

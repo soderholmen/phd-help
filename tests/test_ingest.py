@@ -222,6 +222,63 @@ async def test_fetch_arxiv_versioned_rehit_spends_no_fetch(corpus):
 
 
 @pytest.mark.anyio
+async def test_autojoin_rehit_on_a_failed_doc_redrives_it(corpus):
+    # §8: failures are visible, not rot. A doc stuck in `failed` must not
+    # make every later auto-join a silent no-op — the PDF is already on
+    # disk (the download was paid for), so the re-hit re-drives it.
+    extractor = FakeExtractor(fail=True)
+    store = FakeStore()
+    fetched = []
+
+    async def fetch_pdf(url):
+        fetched.append(url)
+        return b"%PDF arxiv bytes"
+    ing = make(corpus, extractor=extractor, store=store, fetch_pdf=fetch_pdf)
+    rec = await ing.fetch_arxiv("2401.00001")
+    assert corpus.get(rec.doc_id).status == "failed"
+    # the fault clears (transient crash); a later search re-hits the paper
+    extractor.fail = False
+    again = await ing.fetch_arxiv("2401.00001")
+    assert again.status == "indexed"
+    assert corpus.get(rec.doc_id).status == "indexed"
+    assert len(fetched) == 1  # re-drive reads the stored PDF, no re-download
+    assert len(store.indexed[rec.doc_id]) == 1
+
+
+@pytest.mark.anyio
+async def test_autojoin_redrive_that_fails_again_stays_visible(corpus):
+    # A deterministic failure re-drives, fails again, and stays `failed`
+    # with its error — visible in the status list, never silently swallowed.
+    async def fetch_pdf(url):
+        return b"%PDF arxiv bytes"
+    ing = make(corpus, extractor=FakeExtractor(fail=True), store=FakeStore(),
+               fetch_pdf=fetch_pdf)
+    rec = await ing.fetch_arxiv("2401.00001")
+    again = await ing.fetch_arxiv("2401.00001")
+    assert again.status == "failed"
+    assert "MinerU died" in again.error
+
+
+@pytest.mark.anyio
+async def test_autojoin_sha_dedup_of_a_failed_doc_redrives_it(corpus):
+    # Same bytes under a different id: add_pdf dedupes to the failed doc
+    # and `new=False` used to skip the pipeline — the same silent no-op,
+    # reached through the content-hash door instead of the arXiv one.
+    extractor = FakeExtractor(fail=True)
+
+    async def fetch_pdf(url):
+        return b"%PDF same bytes"
+    ing = make(corpus, extractor=extractor, store=FakeStore(),
+               fetch_pdf=fetch_pdf)
+    rec = await ing.fetch_arxiv("2401.00001")
+    assert corpus.get(rec.doc_id).status == "failed"
+    extractor.fail = False
+    again = await ing.fetch_arxiv("9999.00001")  # different id, same sha
+    assert again.doc_id == rec.doc_id
+    assert corpus.get(rec.doc_id).status == "indexed"
+
+
+@pytest.mark.anyio
 async def test_fetch_arxiv_paywalled_or_dead_raises_without_a_record(corpus):
     async def fetch_pdf(url):
         raise IngestError("PDF fetch failed (404)")
