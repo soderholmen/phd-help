@@ -21,6 +21,7 @@ from phd_helper.context import (ContextInputs, PinnedSource, Turn,
                                 approx_tokens, assemble_context)
 from phd_helper.corpus import Corpus, CorpusError
 from phd_helper.endpoint import VoiceEndpoint
+from phd_helper.gists import body_sha, render_gists, stale_sections
 from phd_helper.ingest import IngestError, Ingestor
 from phd_helper.project import Project
 from phd_helper.server.config import REPO_ROOT, load as load_config
@@ -91,10 +92,20 @@ class Session:
         pinned = await pinned_sources(self.state.corpus,
                                       self.state.corpus_store,
                                       project.root.name)
+        # §4 far-section gists: render what's cached, kick a background
+        # refresh for the stale ones — this turn degrades honestly, the
+        # next turn has them. The selected section is skipped: its full
+        # body rides the turn already.
+        tree = project.section_tree()
+        gist_cache = project.load_gists()
+        distant_gists = render_gists(tree, gist_cache,
+                                     skip=self.selected or "")
+        if stale_sections(tree, project.files(), gist_cache):
+            spawn_gist_refresh(self.state)
         exchanges = _group_exchanges(self.history[1:])
         inputs = ContextInputs(
             section=section, skeleton=project.skeleton(),
-            memory="", distant_gists="", rolling_summary="",
+            memory="", distant_gists=distant_gists, rolling_summary="",
             turns=tuple(Turn("user", text) for text, _ in exchanges),
             pinned=pinned)
         ctx = assemble_context(
@@ -229,6 +240,7 @@ class AppState:
                                  store=self.corpus_store,
                                  fetch_pdf=self._fetch_pdf_or_raise)
         self.ingest_tasks: set[asyncio.Task] = set()
+        self.gist_task: asyncio.Task | None = None
 
     async def _fetch_pdf_or_raise(self, url: str) -> bytes:
         status, body = await self.fetch_pdf(url)
@@ -246,12 +258,58 @@ def spawn(state, coro):
     task = asyncio.create_task(coro)
     state.ingest_tasks.add(task)
     task.add_done_callback(state.ingest_tasks.discard)
+    return task
 
 
 def spawn_ingest(state, doc_id: str) -> None:
     if state.ingestor is not None and state.ingestor.runnable():
         spawn(state, state.ingestor.ingest(doc_id))
     # not runnable: the doc stays queued — paused, visible (§8)
+
+
+GIST_PROMPT = (
+    "Summarize this LaTeX section in one sentence of at most 30 words, "
+    "saying what it covers — the writer sees this line instead of "
+    "opening the file. Reply with the sentence only.")
+GIST_BODY_CAP = 12000  # chars of section body sent to the model
+
+
+async def refresh_gists(state) -> None:
+    """§4: regenerate stale per-section gists in the background. The
+    turn that found them renders with what's cached (stale this turn,
+    present next); an LLM fault stops the pass and the next turn
+    retries — gists are context polish, never an error to surface (§8).
+    Saved after each line so a mid-pass fault keeps the progress."""
+    project = state.project
+    tree = project.section_tree()
+    files = project.files()
+    cache = project.load_gists()
+    for path in stale_sections(tree, files, cache):
+        body = files.get(path, "")
+        if not body.strip():
+            cache[path] = {"sha": body_sha(body), "gist": ""}
+            project.save_gists(cache)
+            continue  # nothing to gist; don't burn a call every turn
+        try:
+            _, _, line = await state.llm.chat(
+                [{"role": "system", "content": GIST_PROMPT},
+                 {"role": "user",
+                  "content": f"{path}:\n\n{body[:GIST_BODY_CAP]}"}],
+                thinking=False, max_tokens=120)
+        except Exception:
+            return  # vLLM down or faulting: keep the gists we have
+        line = " ".join((line or "").split())[:300]
+        if line:
+            cache[path] = {"sha": body_sha(body), "gist": line}
+            project.save_gists(cache)
+
+
+def spawn_gist_refresh(state) -> None:
+    """One refresh at a time — stale gists are not an emergency."""
+    task = getattr(state, "gist_task", None)
+    if task is not None and not task.done():
+        return
+    state.gist_task = spawn(state, refresh_gists(state))
 
 
 def _group_exchanges(messages: list[dict]) -> list[tuple[str, list[dict]]]:

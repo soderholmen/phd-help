@@ -6,6 +6,7 @@ approve (apply-time hash check / re-anchor, snapshot, write) -> undo. All
 persistence lives in ``.phd-helper/`` inside the project folder.
 """
 
+import json
 from pathlib import Path
 
 from phd_helper.bibtex import (BibEntry, dedupe_key, format_entry, make_key,
@@ -28,10 +29,16 @@ class Project:
         self.root = Path(root_dir)
         self.root_file = root_file
         state = self.root / ".phd-helper"
+        self.state_dir = state
         self.pending = PendingDiffs(state)
         self.history = SectionHistory(state)
 
     # -- reading ----------------------------------------------------------
+
+    def files(self) -> dict[str, str]:
+        """The project's .tex files, for callers that walk the tree and
+        the bytes together (gist staleness) without re-rglobbing."""
+        return self._files()
 
     def _files(self) -> dict[str, str]:
         out = {}
@@ -51,6 +58,26 @@ class Project:
 
     def read_section(self, path: str) -> str:
         return (self.root / path).read_text(encoding="utf-8")
+
+    # -- gist cache (SPEC §4) -----------------------------------------------
+
+    def load_gists(self) -> dict:
+        """{path: {"sha":…, "gist":…}}; a missing or torn file reads as
+        no gists yet — staleness regenerates them, nothing else (§8)."""
+        try:
+            return json.loads(
+                (self.state_dir / "gists.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def save_gists(self, cache: dict) -> None:
+        # Atomic replace: a background refresh and a turn's read must
+        # never meet a half-written cache.
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        tmp = self.state_dir / "gists.json.tmp"
+        tmp.write_text(json.dumps(cache, ensure_ascii=False),
+                       encoding="utf-8")
+        tmp.replace(self.state_dir / "gists.json")
 
     def read_bib(self) -> str:
         bib = self.root / "refs.bib"

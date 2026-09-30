@@ -56,7 +56,8 @@ async def test_unexpected_error_becomes_an_error_event_not_silence(tmp_path):
                             tts=None, config=Config(), fetch=None,
                             corpus=Corpus(tmp_path / "c"),
                             corpus_store=None, crossref_mailto="",
-                            openalex_mailto="")
+                            openalex_mailto="",
+                            ingest_tasks=set(), gist_task=None)
     session = Session(state, "c1")
     events = []
 
@@ -112,7 +113,8 @@ def make_env(tmp_path, store=None, budget=8000):
                             tts=StubTts(), config=Config(
                                 context_budget_tokens=budget),
                             fetch=None, corpus=corpus, corpus_store=store,
-                            crossref_mailto="", openalex_mailto="")
+                            crossref_mailto="", openalex_mailto="",
+                            ingest_tasks=set(), gist_task=None)
     return state, Session(state, "c1")
 
 
@@ -303,3 +305,108 @@ def test_health_reports_paused_without_a_store(tmp_path):
     # No stack configured: indexing pauses, visibly (§8) — unchanged.
     with TestClient(create_app(state=health_state(tmp_path, None))) as c:
         assert c.get("/health").json()["corpus"] == "paused"
+
+
+# -- per-section gists wiring (SPEC §4) --------------------------------------
+
+
+class GistLlm:
+    """Chat without tools: one canned line per section, counted."""
+
+    def __init__(self, fail_after=None):
+        self.calls = 0
+        self.fail_after = fail_after
+
+    async def chat(self, messages, **kwargs):
+        self.calls += 1
+        if self.fail_after is not None and self.calls > self.fail_after:
+            raise RuntimeError("vllm down")
+        return {"role": "assistant", "content": "  a   one-liner. "}, [], \
+            "  a   one-liner. "
+
+
+def gist_env(tmp_path, llm):
+    paper = tmp_path / "my-paper"
+    (paper / "sections").mkdir(parents=True)
+    (paper / "main.tex").write_text(
+        "\title{My Paper}\n\begin{document}\n"
+        "\input{sections/intro}\n\input{sections/method}\n"
+        "\end{document}\n", encoding="utf-8")
+    (paper / "sections" / "intro.tex").write_text(
+        "\section{Introduction}\nIntro body prose.\n", encoding="utf-8")
+    (paper / "sections" / "method.tex").write_text(
+        "\section{Method}\nMethod body prose.\n", encoding="utf-8")
+    state = SimpleNamespace(project=Project(paper), llm=llm,
+                            ingest_tasks=set(), gist_task=None)
+    return state
+
+
+@pytest.mark.anyio
+async def test_refresh_fills_the_cache_and_a_fresh_pass_spends_no_calls(
+        tmp_path):
+    from phd_helper.server.app import refresh_gists
+    state = gist_env(tmp_path, GistLlm())
+    await refresh_gists(state)
+    cache = state.project.load_gists()
+    assert set(cache) == {"sections/intro.tex", "sections/method.tex"}
+    assert cache["sections/intro.tex"]["gist"] == "a one-liner."
+    state.llm.calls = 0
+    await refresh_gists(state)
+    assert state.llm.calls == 0  # sha truth: nothing stale, nothing spent
+
+
+@pytest.mark.anyio
+async def test_llm_fault_keeps_the_gists_already_written(tmp_path):
+    from phd_helper.server.app import refresh_gists
+    state = gist_env(tmp_path, GistLlm(fail_after=1))
+    await refresh_gists(state)  # must not raise out of the task
+    cache = state.project.load_gists()
+    assert len(cache) == 1  # first line survived, second section pending
+
+
+@pytest.mark.anyio
+async def test_empty_section_is_cached_without_burning_a_call(tmp_path):
+    from phd_helper.server.app import refresh_gists
+    state = gist_env(tmp_path, GistLlm())
+    state.project.write_section("sections/method.tex", "")
+    await refresh_gists(state)
+    assert state.llm.calls == 1  # only intro got a call
+    assert state.project.load_gists()["sections/method.tex"]["gist"] == ""
+
+
+@pytest.mark.anyio
+async def test_gists_reach_the_llm_and_the_selected_section_is_skipped(
+        tmp_path):
+    state, session = make_env(tmp_path, store=DocStore())
+    # make_env's paper has one section; seed its gist as fresh.
+    body = state.project.read_section("sections/intro.tex")
+    from phd_helper.gists import body_sha
+    state.project.save_gists({"sections/intro.tex":
+                              {"sha": body_sha(body),
+                               "gist": "the paper's opening claim"}})
+    await session.run_turn("hello")
+    assert "the paper's opening claim" in sent_text(session)
+    session.select_section("sections/intro.tex")
+    state.llm.calls.clear()
+    await session.run_turn("again")
+    assert "the paper's opening claim" not in sent_text(session)
+
+
+@pytest.mark.anyio
+async def test_a_turn_kicks_the_background_refresh_for_stale_gists(tmp_path):
+    state, session = make_env(tmp_path, store=DocStore())
+    await session.run_turn("hello")
+    assert state.gist_task is not None
+    await state.gist_task  # RecordingLlm answers "ok" as the gist line
+    assert state.project.load_gists()["sections/intro.tex"]["gist"] == "ok"
+
+
+@pytest.mark.anyio
+async def test_spawn_gist_refresh_is_one_at_a_time(tmp_path):
+    from phd_helper.server.app import spawn_gist_refresh
+    state = gist_env(tmp_path, GistLlm())
+    spawn_gist_refresh(state)
+    first = state.gist_task
+    spawn_gist_refresh(state)
+    assert state.gist_task is first  # still running: no second pass
+    await first

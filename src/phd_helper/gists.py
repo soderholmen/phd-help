@@ -16,6 +16,12 @@ import hashlib
 from phd_helper.sections import SectionNode
 
 
+def body_sha(text: str) -> str:
+    """The content-hash truth staleness is judged against; the server
+    writes it into the cache entry beside the gist line."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def flatten(tree: list[SectionNode]) -> list[str]:
     """Section paths in document order (depth-first)."""
     out: list[str] = []
