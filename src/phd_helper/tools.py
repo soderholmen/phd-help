@@ -7,9 +7,14 @@ diff that the user approves. Errors return as tool-result text so the model
 sees them (the bounce), never the user.
 """
 
+from phd_helper.bibtex import BibEntry, parse_bib, same_paper
 from phd_helper.cascade import Lookup, resolve_bibtex
 from phd_helper.project import Project, ProposeError
 from phd_helper.search import search_papers
+
+# SPEC §8: embeddings/LanceDB down -> tool errors, and the agent says one
+# line and continues via web search — the error text carries that advice.
+CORPUS_DOWN = "corpus unavailable — continue with web_search"
 
 TOOL_SCHEMAS = [
     {"type": "function", "function": {
@@ -66,6 +71,36 @@ TOOL_SCHEMAS = [
                          "title"],
             "additionalProperties": False}}},
     {"type": "function", "function": {
+        "name": "corpus_search",
+        "description": "Search the reference corpus (the user's PDF "
+                       "library) for passages relevant to a topic. "
+                       "Returns ranked chunks with page/block locators and "
+                       "doc ids; call corpus_doc with a doc id for its "
+                       "abstract and headings.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "k": {"type": "integer",
+                      "description": "Number of chunks to return, 1-20"},
+                "boost_pinned": {
+                    "type": "boolean",
+                    "description": "Rank sources pinned to this section "
+                                   "first"}},
+            "required": ["query", "k", "boost_pinned"],
+            "additionalProperties": False}}},
+    {"type": "function", "function": {
+        "name": "corpus_doc",
+        "description": "Look up a corpus document by doc id: title, "
+                       "abstract, section headings, and whether it is "
+                       "already in the project's refs.bib.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "doc_id": {"type": "string"}},
+            "required": ["doc_id"],
+            "additionalProperties": False}}},
+    {"type": "function", "function": {
         "name": "section_write",
         "description": "Propose an anchored find/replace patch to a section. "
                        "The patch becomes a pending diff the user approves; "
@@ -108,9 +143,10 @@ def make_validators(project: Project) -> dict:
 
 async def execute_async(call, project: Project, resolve=resolve_bibtex,
                         search=search_papers, fetch=None, mailto: str = "",
-                        openalex_mailto: str = "") -> dict:
-    """Async dispatch: web_search and cite_add hit the network; the rest
-    is sync."""
+                        openalex_mailto: str = "", corpus=None,
+                        store=None) -> dict:
+    """Async dispatch: web_search and cite_add hit the network, the corpus
+    tools hit the index; the rest is sync."""
     if call.name == "web_search":
         if fetch is None and search is search_papers:
             # The real search needs an HTTP fetcher; mis-wiring bounces.
@@ -126,6 +162,10 @@ async def execute_async(call, project: Project, resolve=resolve_bibtex,
                          if hits else
                          "no candidates — rephrase the query or ask the "
                          "user")}
+    if call.name == "corpus_search":
+        return await _corpus_search(call, project, corpus, store)
+    if call.name == "corpus_doc":
+        return await _corpus_doc(call, project, corpus, store)
     if call.name != "cite_add":
         return execute(call, project)
     if fetch is None and resolve is resolve_bibtex:
@@ -176,3 +216,69 @@ def execute(call, project: Project) -> dict:
                 "section": diff.section_path,
                 "note": "diff shown to the user; awaiting approval"}
     return {"error": f"unknown tool '{call.name}'"}
+
+
+# -- corpus tools (SPEC §6): the store behind the CorpusStore protocol -----
+
+def _locator(h) -> str:
+    pages = (f"p.{h.page_start}" if h.page_start == h.page_end
+             else f"pp.{h.page_start}-{h.page_end}")
+    return f"{pages}, blocks {h.block_start}-{h.block_end}"
+
+
+async def _corpus_search(call, project: Project, corpus, store) -> dict:
+    if store is None:
+        return {"error": CORPUS_DOWN}
+    a = call.args
+    k = max(1, min(int(a["k"]), 20))
+    boost = (set(corpus.pinned_ids(project.root.name))
+             if a["boost_pinned"] and corpus is not None else set())
+    try:
+        hits = await store.search(a["query"], k, boost)
+    except Exception:
+        return {"error": CORPUS_DOWN}  # §8: faulting index == no index
+    results = []
+    for i, h in enumerate(hits, 1):
+        rec = corpus.get(h.doc_id) if corpus is not None else None
+        results.append({"n": i, "doc_id": h.doc_id,
+                        "title": rec.title if rec else "",
+                        "arxiv": rec.arxiv if rec else "",
+                        "doi": rec.doi if rec else "",
+                        "section": h.section_path,
+                        "locator": _locator(h), "kind": h.kind,
+                        "text": h.text})
+    return {"results": results,
+            "note": ("corpus_doc(doc_id) for abstract + headings; cite_add "
+                     "with the hit's arxiv or doi" if results else
+                     "nothing in the corpus — try web_search")}
+
+
+async def _corpus_doc(call, project: Project, corpus, store) -> dict:
+    if store is None:
+        return {"error": CORPUS_DOWN}
+    doc_id = call.args["doc_id"]
+    rec = corpus.get(doc_id) if corpus is not None else None
+    if rec is None:
+        return {"error": "no such doc_id — run corpus_search first"}
+    try:
+        info = await store.doc(doc_id)
+    except Exception:
+        return {"error": CORPUS_DOWN}
+    return {"doc_id": doc_id, "title": rec.title, "status": rec.status,
+            "abstract": info.abstract if info else "",
+            "headings": list(info.headings) if info else [],
+            "arxiv": rec.arxiv, "doi": rec.doi, "year": rec.year,
+            "bib": _bib_status(project, rec)}
+
+
+def _bib_status(project: Project, rec) -> str:
+    """Is this corpus paper already cited? Identifier match against the
+    project's refs.bib — same rule the cite loop uses for key reuse (§6)."""
+    if not (rec.arxiv or rec.doi):
+        return "unknown (no arXiv/DOI id)"
+    probe = BibEntry(key="", type="", fields={"arxiv": rec.arxiv,
+                                              "doi": rec.doi})
+    for e in parse_bib(project.read_bib()):
+        if same_paper(e, probe):
+            return f"already in refs.bib as {e.key}"
+    return "not in refs.bib"

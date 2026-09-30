@@ -201,3 +201,179 @@ def test_cite_add_validator_checks_anchor(paper):
               "replace": "x", "arxiv": "1", "doi": "", "title": ""}) is None
     assert v({"section": "sections/intro.tex", "find": "nope",
               "replace": "x", "arxiv": "1", "doi": "", "title": ""})
+
+
+# -- corpus_search / corpus_doc (SPEC §6): the store behind a fake ---------
+
+from phd_helper.chunking import Chunk  # noqa: E402
+from phd_helper.corpus import Corpus  # noqa: E402
+from phd_helper.store import ChunkHit, DocInfo  # noqa: E402
+
+
+class FakeStore:
+    """Keyword-overlap stand-in for LanceDB; boost_ids doubles the score."""
+
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.rows: list[tuple[str, Chunk]] = []
+        self.infos: dict[str, DocInfo] = {}
+
+    async def search(self, query, k, boost_ids):
+        if self.fail:
+            raise RuntimeError("LanceDB down")
+        terms = query.lower().split()
+        scored = []
+        for doc_id, c in self.rows:
+            hay = f"{c.text} {c.section_path}".lower()
+            s = sum(hay.count(t) for t in terms)
+            if s:
+                scored.append((s * (2 if doc_id in boost_ids else 1),
+                               doc_id, c))
+        scored.sort(key=lambda x: -x[0])
+        return [ChunkHit(doc_id=d, text=c.text, section_path=c.section_path,
+                         page_start=c.page_start, page_end=c.page_end,
+                         block_start=c.block_start, block_end=c.block_end,
+                         kind=c.kind, score=float(s))
+                for s, d, c in scored[:k]]
+
+    async def doc(self, doc_id):
+        return self.infos.get(doc_id)
+
+    async def index(self, doc_id, chunks):
+        self.rows.extend((doc_id, c) for c in chunks)
+
+    async def remove(self, doc_id):
+        self.rows = [(d, c) for d, c in self.rows if d != doc_id]
+
+
+def chunk(text, block=0, page=1, section="", kind="text", abstract=False):
+    return Chunk(text=text, embed_text=text, section_path=section,
+                 page_start=page, page_end=page, block_start=block,
+                 block_end=block, kind=kind, is_abstract=abstract)
+
+
+@pytest.fixture
+def corpus(tmp_path):
+    return Corpus(tmp_path / "corpus")
+
+
+def own(corpus, store, *, title, arxiv="", doi="", body, hits=()):
+    rec, _ = corpus.add_pdf(body, title=title, arxiv=arxiv, doi=doi)
+    for c in hits:
+        store.rows.append((rec.doc_id, c))
+    return rec
+
+
+@pytest.mark.anyio
+async def test_corpus_search_returns_ranked_chunks_with_locators(paper, corpus):
+    store = FakeStore()
+    rec = own(corpus, store, title="Parakeet", arxiv="2401.00001",
+              body=b"a", hits=[chunk("the parakeet model scales audio",
+                                      block=12, page=3, section="Method")])
+    result = await execute_async(
+        call("corpus_search", {"query": "parakeet audio", "k": 5,
+                              "boost_pinned": False}),
+        paper, corpus=corpus, store=store)
+    hit = result["results"][0]
+    assert hit["doc_id"] == rec.doc_id
+    assert hit["title"] == "Parakeet"  # registry join, not stored per chunk
+    assert hit["section"] == "Method"
+    assert hit["locator"] == "p.3, blocks 12-12"
+    assert "corpus_doc" in result["note"]  # the chain the model should take
+
+
+@pytest.mark.anyio
+async def test_corpus_search_boosts_pinned_but_never_filters(paper, corpus):
+    store = FakeStore()
+    pinned = own(corpus, store, title="Pinned", body=b"p",
+                 hits=[chunk("shared topic word", section="A")])
+    other = own(corpus, store, title="Other", body=b"o",
+                hits=[chunk("shared topic word word", section="B")])
+    corpus.pin(pinned.doc_id, paper.root.name)
+    result = await execute_async(
+        call("corpus_search", {"query": "shared topic word", "k": 5,
+                              "boost_pinned": True}),
+        paper, corpus=corpus, store=store)
+    ids = [h["doc_id"] for h in result["results"]]
+    assert ids == [pinned.doc_id, other.doc_id]  # boosted to the top, both kept
+    result = await execute_async(
+        call("corpus_search", {"query": "shared topic word", "k": 5,
+                              "boost_pinned": False}),
+        paper, corpus=corpus, store=store)
+    assert [h["doc_id"] for h in result["results"]] == [other.doc_id,
+                                                        pinned.doc_id]
+
+
+@pytest.mark.anyio
+async def test_corpus_search_k_limits_results(paper, corpus):
+    store = FakeStore()
+    own(corpus, store, title="T", body=b"x",
+        hits=[chunk(f"topic {i}") for i in range(6)])
+    result = await execute_async(
+        call("corpus_search", {"query": "topic", "k": 2,
+                              "boost_pinned": False}),
+        paper, corpus=corpus, store=store)
+    assert len(result["results"]) == 2
+
+
+@pytest.mark.anyio
+async def test_corpus_search_empty_is_a_result_not_an_error(paper, corpus):
+    store = FakeStore()
+    result = await execute_async(
+        call("corpus_search", {"query": "zzz", "k": 5,
+                              "boost_pinned": False}),
+        paper, corpus=corpus, store=store)
+    assert result["results"] == [] and "error" not in result
+
+
+@pytest.mark.anyio
+async def test_corpus_search_down_degrades_to_web_search_advice(paper, corpus):
+    # §8: embeddings/LanceDB down -> tool error, agent continues via web
+    # search. Both the missing store and a faulting one degrade the same.
+    result = await execute_async(
+        call("corpus_search", {"query": "x", "k": 5, "boost_pinned": False}),
+        paper, corpus=corpus, store=None)
+    assert "web_search" in result["error"]
+    result = await execute_async(
+        call("corpus_search", {"query": "x", "k": 5, "boost_pinned": False}),
+        paper, corpus=corpus, store=FakeStore(fail=True))
+    assert "web_search" in result["error"]
+
+
+@pytest.mark.anyio
+async def test_corpus_doc_returns_abstract_headings_bib_status(paper, corpus):
+    store = FakeStore()
+    rec = own(corpus, store, title="Mesh Anything", arxiv="2401.00002",
+              body=b"m")
+    store.infos[rec.doc_id] = DocInfo(
+        abstract="We segment anything.", headings=("Intro", "Method"))
+    (paper.root / "refs.bib").write_text(
+        "@article{shazeer2024mesh, title={Mesh Anything}, "
+        "arxiv={2401.00002}}\n", encoding="utf-8")
+    result = await execute_async(call("corpus_doc", {"doc_id": rec.doc_id}),
+                                 paper, corpus=corpus, store=store)
+    assert result["title"] == "Mesh Anything"
+    assert result["abstract"] == "We segment anything."
+    assert result["headings"] == ["Intro", "Method"]
+    assert result["status"] == "queued"  # per-PDF status is visible to the agent
+    assert "shazeer2024mesh" in result["bib"]  # already cited -> reuse the key
+
+
+@pytest.mark.anyio
+async def test_corpus_doc_not_in_bib_and_unknown_id(paper, corpus):
+    store = FakeStore()
+    rec = own(corpus, store, title="Uncited", doi="10.1000/u", body=b"u")
+    store.infos[rec.doc_id] = DocInfo(abstract="", headings=())
+    result = await execute_async(call("corpus_doc", {"doc_id": rec.doc_id}),
+                                 paper, corpus=corpus, store=store)
+    assert result["bib"] == "not in refs.bib"
+    result = await execute_async(call("corpus_doc", {"doc_id": "nope"}),
+                                 paper, corpus=corpus, store=store)
+    assert "error" in result
+
+
+@pytest.mark.anyio
+async def test_corpus_doc_down_degrades(paper, corpus):
+    result = await execute_async(call("corpus_doc", {"doc_id": "x"}),
+                                 paper, corpus=corpus, store=None)
+    assert "web_search" in result["error"]

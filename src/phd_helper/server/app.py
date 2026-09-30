@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from phd_helper.cascade import ArxivRateLimited
+from phd_helper.corpus import Corpus
 from phd_helper.endpoint import VoiceEndpoint
 from phd_helper.project import Project
 from phd_helper.server.config import REPO_ROOT, load as load_config
@@ -87,7 +88,9 @@ class Session:
                     result = await execute_async(
                         vc, project, fetch=self.state.fetch,
                         mailto=self.state.config.crossref_mailto,
-                        openalex_mailto=self.state.config.openalex_mailto)
+                        openalex_mailto=self.state.config.openalex_mailto,
+                        corpus=self.state.corpus,
+                        store=self.state.corpus_store)
                     if result.get("status") == "pending":
                         # One-at-a-time diff awaiting approval (§5). The
                         # result's find/replace are the final ones (cite_add
@@ -138,6 +141,11 @@ class AppState:
             lease_timeout=self.config.lease_timeout_s)
         # One active project at a time (§7); scaffold ships the sample paper.
         self.project = Project(REPO_ROOT / "sample_paper")
+        # One global corpus across projects (§6). The registry is live now;
+        # the LanceDB/embedder store adapter waits on the 3090 stack — until
+        # then the corpus tools degrade to tool errors per the §8 matrix.
+        self.corpus = Corpus(REPO_ROOT / "corpus_data")
+        self.corpus_store = None
 
 
 def create_app(state: "AppState | None" = None) -> FastAPI:
@@ -157,6 +165,8 @@ def create_app(state: "AppState | None" = None) -> FastAPI:
             "vllm": await state.llm.healthy(),
             "stt": "faulted" if state.stt.faulted() else "stub",
             "tts": "faulted" if state.tts.faulted() else "stub",
+            # §8: indexing pauses (queued docs wait visibly) without the store.
+            "corpus": "ok" if state.corpus_store is not None else "paused",
             "endpoint_holder": state.endpoint.endpoint(time.monotonic()),
         }
 

@@ -20,3 +20,6 @@ certs/
 
 # Throwaway prototype scratch (source promoted to src/; logs only remain)
 prototype/
+
+# Corpus store: PDFs + registry on the server filesystem (Syncthing-replicated)
+corpus_data/
