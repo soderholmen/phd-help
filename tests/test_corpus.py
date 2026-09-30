@@ -47,6 +47,7 @@ def test_new_arxiv_version_supersedes_the_old_record(corpus):
     new = add(corpus, body=b"pdf bytes v2")
     assert new.doc_id != old.doc_id
     assert new.status == "queued"
+    assert new.supersedes == old.doc_id  # the pipeline evicts the old chunks
     assert corpus.get(old.doc_id) is None  # superseded, not kept around
     assert corpus.list() == [new]
     assert corpus.pinned_ids("my-paper") == {new.doc_id}  # pins carry over

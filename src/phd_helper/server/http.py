@@ -27,5 +27,15 @@ class HttpFetcher:
             return Response(0, f"{type(e).__name__}: {e}")
         return Response(r.status_code, r.text)
 
+    async def fetch_bytes(self, url: str,
+                          headers: dict | None = None) -> tuple[int, bytes]:
+        """Binary GET for corpus PDFs — r.text would corrupt them. Same
+        failure envelope: a dead connection is status 0, not an exception."""
+        try:
+            r = await self._http.get(url, headers=headers or {})
+        except httpx.HTTPError as e:
+            return 0, f"{type(e).__name__}: {e}".encode()
+        return r.status_code, r.content
+
     async def aclose(self):
         await self._http.aclose()

@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from types import SimpleNamespace
 
+from phd_helper.corpus import Corpus
 from phd_helper.project import Project
 from phd_helper.server.app import Session, create_app
 
@@ -16,14 +17,16 @@ def anyio_backend():
     return "asyncio"
 
 
-def test_app_shutdown_closes_the_http_client():
+def test_app_shutdown_closes_the_http_client(tmp_path):
     closed = []
 
     class Http:
         async def aclose(self):
             closed.append(True)
 
-    with TestClient(create_app(state=SimpleNamespace(http=Http()))):
+    state = SimpleNamespace(http=Http(), corpus=Corpus(tmp_path / "c"),
+                            ingestor=None, ingest_tasks=set())
+    with TestClient(create_app(state=state)):
         pass
     assert closed == [True]  # shared httpx client must not leak
 

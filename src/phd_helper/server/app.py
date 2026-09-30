@@ -12,13 +12,14 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from phd_helper.cascade import ArxivRateLimited
-from phd_helper.corpus import Corpus
+from phd_helper.corpus import Corpus, CorpusError
 from phd_helper.endpoint import VoiceEndpoint
+from phd_helper.ingest import IngestError, Ingestor
 from phd_helper.project import Project
 from phd_helper.server.config import REPO_ROOT, load as load_config
 from phd_helper.server.http import HttpFetcher
@@ -90,7 +91,8 @@ class Session:
                         mailto=self.state.config.crossref_mailto,
                         openalex_mailto=self.state.config.openalex_mailto,
                         corpus=self.state.corpus,
-                        store=self.state.corpus_store)
+                        store=self.state.corpus_store,
+                        autojoin=lambda ids: autojoin(self.state, ids))
                     if result.get("status") == "pending":
                         # One-at-a-time diff awaiting approval (§5). The
                         # result's find/replace are the final ones (cite_add
@@ -146,6 +148,45 @@ class AppState:
         # then the corpus tools degrade to tool errors per the §8 matrix.
         self.corpus = Corpus(REPO_ROOT / "corpus_data")
         self.corpus_store = None
+        # PDF fetch is arXiv-spaced too (§6 politeness covers all arXiv
+        # access, not just the bibtex cascade).
+        self.fetch_pdf = ArxivRateLimited(self.http.fetch_bytes)
+        self.ingestor = Ingestor(self.corpus, extractor=None,
+                                 store=self.corpus_store,
+                                 fetch_pdf=self._fetch_pdf)
+        self.ingest_tasks: set[asyncio.Task] = set()
+
+    async def _fetch_pdf(self, url: str) -> bytes:
+        status, body = await self.fetch_pdf(url)
+        if status != 200 or not body:
+            raise IngestError(f"PDF fetch failed ({status})")
+        return body
+
+
+# Background ingest plumbing, state-agnostic so the HTTP seam can be
+# tested against a bare namespace (the tests' harness style).
+
+def spawn(state, coro):
+    """Track background tasks so they are never garbage-collected
+    mid-flight (the ingest pipeline runs as one per PDF)."""
+    task = asyncio.create_task(coro)
+    state.ingest_tasks.add(task)
+    task.add_done_callback(state.ingest_tasks.discard)
+
+
+def spawn_ingest(state, doc_id: str) -> None:
+    if state.ingestor is not None and state.ingestor.runnable():
+        spawn(state, state.ingestor.ingest(doc_id))
+    # not runnable: the doc stays queued — paused, visible (§8)
+
+
+async def autojoin(state, arxiv_ids: list[str]) -> None:
+    """§6: search hits with an openly downloadable PDF auto-join the
+    corpus. Fire-and-forget: the agent's turn never waits on indexing."""
+    if state.ingestor is None or not state.ingestor.runnable():
+        return
+    for aid in arxiv_ids:
+        spawn(state, state.ingestor.fetch_arxiv(aid))
 
 
 def create_app(state: "AppState | None" = None) -> FastAPI:
@@ -153,6 +194,11 @@ def create_app(state: "AppState | None" = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # Startup resume (§6): crashed extractions go back to the queue and
+        # everything queued drains — if the pipeline is runnable at all.
+        state.corpus.reconcile_startup()
+        if state.ingestor is not None and state.ingestor.runnable():
+            spawn(state, state.ingestor.drain_queued())
         yield
         await state.http.aclose()  # release the shared client on shutdown
 
@@ -169,6 +215,41 @@ def create_app(state: "AppState | None" = None) -> FastAPI:
             "corpus": "ok" if state.corpus_store is not None else "paused",
             "endpoint_holder": state.endpoint.endpoint(time.monotonic()),
         }
+
+    # -- corpus doors and status (SPEC §6): upload is door 1, the agent
+    # fetch/auto-join is door 2; the UI reads status, never searches.
+
+    @app.post("/corpus/upload")
+    async def corpus_upload(request: Request, title: str = "",
+                            arxiv: str = "", doi: str = "", year: str = ""):
+        data = await request.body()  # raw PDF bytes (no multipart dep)
+        if not data:
+            return JSONResponse({"error": "empty PDF body"}, status_code=400)
+        rec, new = state.corpus.add_pdf(
+            data, title=title, arxiv=arxiv, doi=doi, year=year,
+            source="upload")
+        if new:
+            spawn_ingest(state, rec.doc_id)
+        return {"doc_id": rec.doc_id, "status": rec.status, "new": new}
+
+    @app.get("/corpus/docs")
+    async def corpus_docs():
+        # Per-PDF status so failures are visible, not rot (§6).
+        return [{"doc_id": d.doc_id, "title": d.title, "status": d.status,
+                 "error": d.error, "arxiv": d.arxiv, "doi": d.doi,
+                 "year": d.year, "source": d.source,
+                 "pinned_in": list(d.pinned_in),
+                 "chunk_count": d.chunk_count}
+                for d in state.corpus.list()]
+
+    @app.post("/corpus/{doc_id}/retry")
+    async def corpus_retry(doc_id: str):
+        try:
+            rec = state.corpus.retry(doc_id)
+        except CorpusError as e:
+            return JSONResponse({"error": str(e)}, status_code=409)
+        spawn_ingest(state, doc_id)
+        return {"doc_id": doc_id, "status": rec.status}
 
     @app.websocket("/ws/voice")
     async def voice(ws: WebSocket):

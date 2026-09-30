@@ -144,7 +144,7 @@ def make_validators(project: Project) -> dict:
 async def execute_async(call, project: Project, resolve=resolve_bibtex,
                         search=search_papers, fetch=None, mailto: str = "",
                         openalex_mailto: str = "", corpus=None,
-                        store=None) -> dict:
+                        store=None, autojoin=None) -> dict:
     """Async dispatch: web_search and cite_add hit the network, the corpus
     tools hit the index; the rest is sync."""
     if call.name == "web_search":
@@ -153,6 +153,17 @@ async def execute_async(call, project: Project, resolve=resolve_bibtex,
             return {"error": "search unavailable (no HTTP fetcher)"}
         hits = await search(call.args["query"], fetch,
                             mailto=openalex_mailto)
+        if autojoin is not None:
+            # §6: papers with an openly downloadable PDF auto-join the
+            # corpus (arXiv ids are the open path; paywalled hits get a
+            # bib entry only). Best-effort — a dead fetch never sinks the
+            # search result the model is waiting on.
+            ids = [h.arxiv for h in hits if h.arxiv]
+            if ids:
+                try:
+                    await autojoin(ids)
+                except Exception:
+                    pass
         return {"results": [{"n": i, "title": h.title,
                              "authors": " and ".join(h.authors),
                              "year": h.year, "arxiv": h.arxiv,

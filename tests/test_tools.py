@@ -195,6 +195,38 @@ async def test_web_search_without_a_fetcher_bounces(paper):
     assert "search unavailable" in result["error"]
 
 
+# -- auto-join (SPEC §6): openly downloadable PDFs join the corpus ---------
+
+@pytest.mark.anyio
+async def test_web_search_auto_joins_arxiv_hits(paper):
+    joined = []
+
+    async def autojoin(arxiv_ids):
+        joined.append(arxiv_ids)
+
+    hits = [PaperHit(title="Mesh Anything", authors=(), year="2024",
+                     arxiv="2401.00002", doi="", venue="arXiv",
+                     source="arxiv"),
+            PaperHit(title="Paywalled", authors=(), year="2020",
+                     arxiv="", doi="10.1000/p", venue="ACM",
+                     source="openalex")]
+    result = await execute_async(
+        call("web_search", {"query": "mesh anything"}), paper,
+        search=fake_search(hits), autojoin=autojoin)
+    assert joined == [["2401.00002"]]  # arXiv PDFs only; paywalled stays bib-only
+    assert len(result["results"]) == 2  # the search result stands regardless
+
+
+@pytest.mark.anyio
+async def test_autojoin_failure_never_sinks_the_search_result(paper):
+    async def autojoin(arxiv_ids):
+        raise RuntimeError("server offline")
+    result = await execute_async(
+        call("web_search", {"query": "mesh anything"}), paper,
+        search=fake_search(HITS), autojoin=autojoin)
+    assert len(result["results"]) == 1 and "error" not in result
+
+
 def test_cite_add_validator_checks_anchor(paper):
     v = make_validators(paper)["cite_add"]
     assert v({"section": "sections/intro.tex", "find": "It works well.",

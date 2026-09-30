@@ -48,6 +48,9 @@ class DocRecord:
     added_at: float = 0.0
     indexed_at: float = 0.0
     chunk_count: int = 0
+    # doc id this record replaced (new arXiv version re-fetched, §6) — the
+    # pipeline evicts the superseded doc's chunks from the index.
+    supersedes: str = ""
 
 
 @dataclass
@@ -98,6 +101,7 @@ class Corpus:
             doc_id=sha[:16], sha256=sha, title=title, arxiv=arxiv, doi=doi,
             year=year, source=source, status="queued",
             pinned_in=owned.pinned_in if owned else (),
+            supersedes=owned.doc_id if owned else "",
             added_at=time.time())
         if owned is not None:  # new version of an owned paper (§6)
             (self.root / "files" / f"{owned.doc_id}.pdf").unlink(missing_ok=True)
