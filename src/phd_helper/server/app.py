@@ -395,6 +395,21 @@ class AppState:
                 REPO_ROOT / "corpus_data" / "lancedb", HarrierEmbedder(),
                 reranker=QwenReranker())  # lazy: loads on first search
             extractor = MinerUExtractor()
+        # Voice stack, same gate shape (PHD_AUDIO_STACK): "off" keeps the
+        # stubs (§8 honest silence); "local" swaps in thin clients over the
+        # py3.12 sidecars — the models never load here, because Smart App
+        # Control blocks torch in this venv (docs/audio-stack.md).
+        if self.config.audio_stack == "local":
+            from phd_helper.segmenting import EnergyVad
+            from phd_helper.server.stt import SidecarStt
+            from phd_helper.server.tts import MossTts
+            self.stt = SidecarStt(
+                self.config.stt_url,
+                vad=EnergyVad(threshold=self.config.vad_threshold),
+                hangover_s=self.config.conversation_hangover_s,
+                min_utterance_s=self.config.min_utterance_s)
+            self.tts = MossTts(self.config.tts_url,
+                               self.config.tts_prompt_wav)
         # PDF fetch is arXiv-spaced too (§6 politeness covers all arXiv
         # access, not just the bibtex cascade).
         self.fetch_pdf = ArxivRateLimited(self.http.fetch_bytes)
@@ -772,6 +787,13 @@ def create_app(state: "AppState | None" = None,
         finally:
             # A faulting ending must not leak the shared HTTP client.
             await state.http.aclose()  # release the shared client on shutdown
+            # Audio clients exist only on the local stack; the
+            # SimpleNamespace test states have neither the providers nor
+            # their aclose, hence both guards.
+            for provider in (getattr(state, "stt", None),
+                             getattr(state, "tts", None)):
+                if provider is not None and hasattr(provider, "aclose"):
+                    await provider.aclose()
 
     app = FastAPI(title="phd-helper", lifespan=lifespan)
     app.state.phd = state
@@ -783,10 +805,21 @@ def create_app(state: "AppState | None" = None,
         corpus = "paused"
         if state.corpus_store is not None:
             corpus = "ok" if await state.corpus_store.healthy() else "faulted"
+
+        async def audio_status(p):
+            # Stubs answer "stub"; sidecar adapters answer with a live
+            # probe. Duck-typed on healthy() so the stub-injecting tests'
+            # SimpleNamespace states keep answering without change.
+            if p.faulted():
+                return "faulted"        # counter is truth until a turn heals it
+            if not hasattr(p, "healthy"):
+                return "stub"
+            return "ok" if await p.healthy() else "faulted"
+
         return {
             "vllm": await state.llm.healthy(),
-            "stt": "faulted" if state.stt.faulted() else "stub",
-            "tts": "faulted" if state.tts.faulted() else "stub",
+            "stt": await audio_status(state.stt),
+            "tts": await audio_status(state.tts),
             # No store configured: indexing pauses (queued docs wait visibly).
             "corpus": corpus,
             "endpoint_holder": state.endpoint.endpoint(time.monotonic()),
@@ -880,7 +913,7 @@ def create_app(state: "AppState | None" = None,
                 if frame["type"] == "websocket.disconnect":
                     break
                 if (data := frame.get("bytes")) is not None:
-                    finals = state.stt.feed(data)
+                    finals = await state.stt.feed(data)
                     if finals:
                         # Voice opens a sitting exactly like text does:
                         # after an idle-end the mic must not run a turn

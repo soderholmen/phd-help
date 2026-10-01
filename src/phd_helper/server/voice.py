@@ -1,9 +1,16 @@
 """Voice pipeline seams (SPEC §3).
 
-The real STT (silero-vad + nemotron-streaming + parakeet) and TTS
-(MOSS-TTS-Realtime) land on the 3090 inside this process later; the
-WebSocket protocol and turn-taking are built against these Protocols now,
-so swapping stubs for models touches nothing else.
+The models never live in this process: Smart App Control blocks torch in
+this venv, and NeMo wants py3.12 besides (docs/audio-stack.md). The real
+implementations are therefore sidecar HTTP servers in separate venvs —
+parakeet in server/stt.py's SidecarStt, MOSS-TTS in server/tts.py's
+MossTts — and these Protocols are the client-side contract they satisfy.
+The stubs keep the same shape so tests and the PHD_AUDIO_STACK=off path
+need no sidecars at all.
+
+Deferred, seam intact: live partials (NeMo 3.0 has no stateful per-chunk
+streaming API) and browser audio-out (server-side synthesis is consumed
+but not yet played; barge-in rides the same gap).
 """
 
 import json
@@ -11,8 +18,12 @@ from typing import AsyncIterator, Protocol
 
 
 class SttProvider(Protocol):
-    def feed(self, pcm16_bytes: bytes) -> list[str]:
-        """Consume 16 kHz mono PCM16 chunks; return authoritative finals."""
+    async def feed(self, pcm16_bytes: bytes) -> list[str]:
+        """Consume 16 kHz mono PCM16 chunks; return authoritative finals.
+
+        Async because a real provider may await a sidecar request at
+        utterance-end; the event loop must stay free for everything else.
+        """
 
     def faulted(self) -> bool: ...
 
@@ -26,12 +37,12 @@ class TtsProvider(Protocol):
 
 class StubStt:
     """Captures and meters audio but produces no finals — transcripts
-    arrive typed until the 3090 stack lands. Honest, not fake."""
+    arrive typed while PHD_AUDIO_STACK=off. Honest, not fake."""
 
     def __init__(self):
         self.bytes_received = 0
 
-    def feed(self, pcm16_bytes: bytes) -> list[str]:
+    async def feed(self, pcm16_bytes: bytes) -> list[str]:
         self.bytes_received += len(pcm16_bytes)
         return []
 

@@ -267,6 +267,45 @@ def test_select_section_control_frame_is_acknowledged(tmp_path):
             assert err["type"] == "error" and err["where"] == "control"
 
 
+class VoiceStt:
+    """An STT that hands back a canned final on every feed. The gate and
+    the sidecar wire are proven in test_audio.py; this fake exists so the
+    WS handler's bytes branch gets its first coverage."""
+
+    def __init__(self, final="tighten the intro"):
+        self.final = final
+        self.feeds = 0
+
+    async def feed(self, pcm16_bytes):
+        self.feeds += 1
+        return [self.final]
+
+    def faulted(self):
+        return False
+
+
+def test_ws_binary_frames_drive_a_turn(tmp_path):
+    # The mic path end-to-end at the socket seam: a binary frame becomes an
+    # STT final becomes a full turn — RecordingLlm proves the final reached
+    # the model, not just that the socket stayed open.
+    state, _ = make_env(tmp_path)
+    state.endpoint = VoiceEndpoint(ping_interval=2.0, lease_timeout=60.0)
+    state.stt = VoiceStt()
+    state.http = FakeHttp()
+    state.ingestor = None
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_bytes(b"\x00\x01" * 800)
+            types = []
+            while "assistant_text" not in types:
+                types.append(ws.receive_json()["type"])
+    assert "turn_started" in types
+    joined = "\n".join(str(m.get("content") or "")
+                       for m in state.llm.calls[0])
+    assert "tighten the intro" in joined
+
+
 # -- /health store probe (SPEC §8, issue #22) -------------------------------
 # §8: "the backend health-probes each component so state is known, not
 # discovered mid-turn" — a configured-but-faulting store must not report ok.
@@ -307,6 +346,48 @@ def test_health_reports_a_configured_but_faulting_store(tmp_path):
     with TestClient(create_app(
             state=health_state(tmp_path, ProbedStore(ok=False)))) as c:
         assert c.get("/health").json()["corpus"] == "faulted"
+
+
+class ProbedProvider:
+    """A sidecar adapter stand-in: /health must live-probe it, not assume."""
+
+    def __init__(self, ok=True, faulted=False):
+        self.ok = ok
+        self._faulted = faulted
+
+    async def healthy(self):
+        return self.ok
+
+    def faulted(self):
+        return self._faulted
+
+    async def aclose(self):
+        pass
+
+
+def test_health_stubs_answer_stub(tmp_path):
+    state = health_state(tmp_path, None)
+    with TestClient(create_app(state=state)) as c:
+        body = c.get("/health").json()
+    assert body["stt"] == "stub" and body["tts"] == "stub"
+
+
+def test_health_probes_live_audio_sidecars(tmp_path):
+    state = health_state(tmp_path, None)
+    state.stt = ProbedProvider(ok=True)
+    state.tts = ProbedProvider(ok=False)
+    with TestClient(create_app(state=state)) as c:
+        body = c.get("/health").json()
+    assert body["stt"] == "ok" and body["tts"] == "faulted"
+
+
+def test_health_fault_counter_beats_a_fresh_probe(tmp_path):
+    # The counter is the adapter's own truth: it stays faulted until a
+    # real turn succeeds, even if the probe endpoint has recovered.
+    state = health_state(tmp_path, None)
+    state.stt = ProbedProvider(ok=True, faulted=True)
+    with TestClient(create_app(state=state)) as c:
+        assert c.get("/health").json()["stt"] == "faulted"
 
 
 def test_health_reports_paused_without_a_store(tmp_path):

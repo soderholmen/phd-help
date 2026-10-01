@@ -39,6 +39,18 @@ def _session_idle() -> float:
             f"PHD_SESSION_IDLE_S must be a number, got {raw!r}") from None
 
 
+def _vad_threshold() -> float:
+    # Energy-VAD speech floor (RMS of 16 kHz mono float). Parsed at
+    # construction like the other knobs — a typo fails Config(), not the
+    # import.
+    raw = os.environ.get("PHD_VAD_THRESHOLD", "0.012")
+    try:
+        return float(raw)
+    except ValueError:
+        raise ValueError(
+            f"PHD_VAD_THRESHOLD must be a number, got {raw!r}") from None
+
+
 def _read_key_store(name):
     try:
         for line in KEY_STORE.read_text(encoding="utf-8").splitlines():
@@ -61,6 +73,8 @@ class Config:
     # SPEC §3 endpointing hangovers (config settings).
     conversation_hangover_s: float = 0.6
     dictation_hangover_s: float = 1.0
+    # SPEC §3: blips under this never become finals (utterance floor).
+    min_utterance_s: float = 0.25
     # SPEC §8 heartbeat cadence.
     ping_interval_s: float = 2.0
     lease_timeout_s: float = 60.0
@@ -79,13 +93,33 @@ class Config:
     # LanceDB on this machine (dev box today, the 3090 later — the server
     # stays prod, this only picks where the adapters live).
     corpus_stack: str = os.environ.get("PHD_CORPUS_STACK", "off")
+    # Where the voice stack runs: "off" keeps the stubs (§8 honest
+    # silence); "local" talks to the STT/TTS sidecars — separate py3.12
+    # processes, because SAC blocks torch in this venv and NeMo needs 3.12
+    # (docs/audio-stack.md). URLs are read at construction so a restarted
+    # process (or a test) can repoint them.
+    audio_stack: str = os.environ.get("PHD_AUDIO_STACK", "off")
+    stt_url: str = field(
+        default_factory=lambda: os.environ.get(
+            "PHD_STT_URL", "http://127.0.0.1:8090"))
+    tts_url: str = field(
+        default_factory=lambda: os.environ.get(
+            "PHD_TTS_URL", "http://127.0.0.1:8083"))
+    tts_prompt_wav: str = field(
+        default_factory=lambda: os.environ.get(
+            "PHD_TTS_PROMPT_WAV",
+            str(REPO_ROOT / ".probe" / "MOSS-TTS" / "assets" / "audio"
+                / "reference_en_0.mp3")))
+    vad_threshold: float = field(default_factory=_vad_threshold)
 
     def __post_init__(self):
         # A typo'd stack must not silently degrade to "off" (§8: state is
         # known at startup, not discovered mid-turn).
-        if self.corpus_stack not in ("off", "local"):
-            raise ValueError("PHD_CORPUS_STACK must be 'off' or 'local', "
-                             f"got {self.corpus_stack!r}")
+        for name, value in (("PHD_CORPUS_STACK", self.corpus_stack),
+                            ("PHD_AUDIO_STACK", self.audio_stack)):
+            if value not in ("off", "local"):
+                raise ValueError(
+                    f"{name} must be 'off' or 'local', got {value!r}")
 
     def sampling(self, thinking: bool) -> dict:
         return THINKING_SAMPLING if thinking else PLAIN_SAMPLING

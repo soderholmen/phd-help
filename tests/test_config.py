@@ -29,3 +29,35 @@ def test_malformed_context_budget_fails_loudly_at_construction(monkeypatch):
 def test_explicit_context_budget_beats_the_env(monkeypatch):
     monkeypatch.setenv("PHD_CONTEXT_BUDGET", "12000")
     assert Config(context_budget_tokens=500).context_budget_tokens == 500
+
+
+def test_valid_audio_stack_values_pass():
+    assert Config(audio_stack="off").audio_stack == "off"
+    assert Config(audio_stack="local").audio_stack == "local"
+
+
+def test_typo_audio_stack_fails_fast():
+    with pytest.raises(ValueError, match="PHD_AUDIO_STACK"):
+        Config(audio_stack="lokal")
+
+
+def test_audio_sidecar_urls_default_to_loopback():
+    c = Config()
+    assert c.stt_url == "http://127.0.0.1:8090"
+    assert c.tts_url == "http://127.0.0.1:8083"
+
+
+def test_audio_sidecar_urls_read_env_at_construction(monkeypatch):
+    # default_factory, not a class-body os.environ.get: the env must be
+    # read when Config() runs, so a test (or a restarted process) can
+    # point the adapters at a different port.
+    monkeypatch.setenv("PHD_STT_URL", "http://127.0.0.1:9999")
+    assert Config().stt_url == "http://127.0.0.1:9999"
+
+
+def test_malformed_vad_threshold_fails_loudly_at_construction(monkeypatch):
+    monkeypatch.setenv("PHD_VAD_THRESHOLD", "0,o12")
+    with pytest.raises(ValueError, match="PHD_VAD_THRESHOLD"):
+        Config()
+    monkeypatch.setenv("PHD_VAD_THRESHOLD", "0.02")
+    assert Config().vad_threshold == 0.02
