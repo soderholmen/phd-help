@@ -9,6 +9,7 @@ persistence lives in ``.phd-helper/`` inside the project folder.
 import json
 from pathlib import Path
 
+from phd_helper import sessionlog
 from phd_helper.bibtex import (BibEntry, dedupe_key, format_entry, make_key,
                                parse_bib, parse_entry, same_paper, with_key)
 from phd_helper.history import SectionHistory
@@ -76,6 +77,22 @@ class Project:
         tmp.write_text(json.dumps(summaries, ensure_ascii=False),
                        encoding="utf-8")
         tmp.replace(self.state_dir / "summaries.json")
+
+    # -- verbatim conversation history (SPEC §7) ----------------------------
+
+    def append_chat(self, records) -> None:
+        sessionlog.append(self.state_dir / "chat.jsonl", records)
+
+    def chat_tail(self) -> list[dict]:
+        """The verbatim messages after the last divider — what a reopened
+        sitting resumes with (older talk rides on as rolling summaries)."""
+        return sessionlog.read_tail(self.state_dir / "chat.jsonl")
+
+    def chat_divider(self) -> dict | None:
+        return sessionlog.last_divider(self.state_dir / "chat.jsonl")
+
+    def write_chat_divider(self, record: dict) -> None:
+        sessionlog.append(self.state_dir / "chat.jsonl", [record])
 
     # -- paper memory (SPEC §4) ---------------------------------------------
 

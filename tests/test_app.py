@@ -3,6 +3,7 @@ turn-error containment. The voice loop itself is proven end-to-end against
 live vLLM (§2); this file covers what only the app owns.
 """
 
+import asyncio
 import json
 
 import pytest
@@ -14,7 +15,9 @@ from phd_helper.gists import body_sha
 from phd_helper.toolcall import ValidCall
 from phd_helper.endpoint import VoiceEndpoint
 from phd_helper.project import Project
-from phd_helper.server.app import Session, create_app
+from phd_helper import sessionlog
+from phd_helper.server.app import (Session, create_app, end_sitting,
+                                   ensure_sitting, idle_expired)
 from phd_helper.server.config import Config
 from phd_helper.server.voice import StubStt, StubTts
 from phd_helper.store import DocInfo
@@ -62,7 +65,7 @@ async def test_unexpected_error_becomes_an_error_event_not_silence(tmp_path):
                             corpus_store=None, crossref_mailto="",
                             openalex_mailto="",
                             ingest_tasks=set(), gist_task=None)
-    session = Session(state, "c1")
+    session = Session(state)
     events = []
 
     async def capture(event):
@@ -118,8 +121,9 @@ def make_env(tmp_path, store=None, budget=8000):
                                 context_budget_tokens=budget),
                             fetch=None, corpus=corpus, corpus_store=store,
                             crossref_mailto="", openalex_mailto="",
-                            ingest_tasks=set(), gist_task=None)
-    return state, Session(state, "c1")
+                            ingest_tasks=set(), gist_task=None,
+                            sitting=None)
+    return state, Session(state)
 
 
 def sent_text(session) -> str:
@@ -472,22 +476,38 @@ async def test_distill_skips_empty_sittings_and_llm_faults(tmp_path):
     assert state2.project.load_memory() == ""  # fault: skip, no raise
 
 
-@pytest.mark.anyio
-async def test_disconnect_distills_the_sitting(tmp_path):
-    import asyncio
+def ws_state(tmp_path):
+    """make_env's state plus what only the WS door reaches for."""
     state, _ = make_env(tmp_path)
     state.endpoint = VoiceEndpoint(ping_interval=2.0, lease_timeout=60.0)
     state.stt = StubStt()
     state.http = FakeHttp()
     state.ingestor = None
+    return state
+
+
+def test_tab_close_is_not_a_session_end(tmp_path):
+    # §7: a sitting ends on switch/shutdown/idle — not on a tab closing.
+    # Closing the socket must not distill, and the sitting must survive
+    # for the next reconnect; graceful shutdown is what folds it.
+    state = ws_state(tmp_path)
     with TestClient(create_app(state=state)) as client:
         with client.websocket_connect("/ws/voice?client=c1") as ws:
             assert ws.receive_json()["type"] == "hello"
             ws.send_json({"type": "typed", "text": "hello there"})
             assert ws.receive_json()["type"] == "turn_started"
-    await asyncio.gather(*state.ingest_tasks)  # the distill task
-    # RecordingLlm answers "ok" — that became the distilled memory.
+            while ws.receive_json()["type"] != "assistant_text":
+                pass
+        assert state.sitting is not None          # the sitting survived
+        assert state.project.load_memory() == ""  # nothing distilled yet
+        with client.websocket_connect("/ws/voice?client=c2") as ws2:
+            assert ws2.receive_json()["type"] == "hello"
+            assert state.sitting is not None      # same sitting, new tab
+    # Graceful shutdown ended it: RecordingLlm's "ok" became the memory.
+    assert state.sitting is None
     assert state.project.load_memory() == "ok"
+    div = state.project.chat_divider()
+    assert div and div["reason"] == "shutdown" and div["turns"] == 1
 
 
 # -- rolling summaries wiring (SPEC §4/§7) -----------------------------------
@@ -531,14 +551,8 @@ async def test_rolling_summaries_ride_the_context(tmp_path):
     assert "hook was rewritten twice" in sent_text(session)
 
 
-@pytest.mark.anyio
-async def test_disconnect_distills_summaries_too(tmp_path):
-    import asyncio
-    state, _ = make_env(tmp_path)
-    state.endpoint = VoiceEndpoint(ping_interval=2.0, lease_timeout=60.0)
-    state.stt = StubStt()
-    state.http = FakeHttp()
-    state.ingestor = None
+def test_shutdown_distills_summaries_too(tmp_path):
+    state = ws_state(tmp_path)
     with TestClient(create_app(state=state)) as client:
         with client.websocket_connect("/ws/voice?client=c1") as ws:
             assert ws.receive_json()["type"] == "hello"
@@ -547,11 +561,14 @@ async def test_disconnect_distills_summaries_too(tmp_path):
             ws.receive_json()
             ws.send_json({"type": "typed", "text": "tighten it"})
             assert ws.receive_json()["type"] == "turn_started"
-    await asyncio.gather(*state.ingest_tasks)
+            while ws.receive_json()["type"] != "assistant_text":
+                pass
     # RecordingLlm answers "ok"; the exchange was anchored, so intro
-    # got a dated summary entry.
+    # got a dated summary entry at the sitting's end.
     assert state.project.load_summaries()["sections/intro.tex"][-1]["text"] \
         == "ok"
+    # The divider names the sections the sitting touched (§7).
+    assert state.project.chat_divider()["sections"] == ["sections/intro.tex"]
 
 
 # -- section tree door + nested selection (web shell, SPEC §1) --------------
@@ -597,7 +614,7 @@ def test_select_section_accepts_nested_nodes(tmp_path):
                             corpus_store=None, crossref_mailto="",
                             openalex_mailto="",
                             ingest_tasks=set(), gist_task=None)
-    session = Session(state, "c1")
+    session = Session(state)
     assert session.select_section("sections/background.tex")
     assert session.selected == "sections/background.tex"
     assert "sections/background.tex" in session.history[0]["content"]
@@ -853,3 +870,321 @@ async def test_note_follows_disk_truth_when_resolved_elsewhere(tmp_path):
 
     assert session.pending_diffs == []
     assert "PENDING DIFFS" not in state.llm.calls[2][0]["content"]
+
+
+# -- sitting lifecycle + verbatim history (SPEC §7, #27) --------------------
+# A sitting = one project sitting shared by every tab: it survives tab
+# closes, resumes the verbatim JSONL after an abrupt end, ends on
+# switch/shutdown/idle with a dated divider and a one-line recap.
+
+
+@pytest.mark.anyio
+async def test_abrupt_end_resumes_verbatim_turns(tmp_path):
+    # The §8 crash shape: chat.jsonl has messages, no divider (the
+    # process died before end_sitting). A fresh sitting resumes them
+    # verbatim and the recap says so.
+    state, _ = make_env(tmp_path)
+    state.project.append_chat([
+        {"role": "user", "content": "what was I saying?", "section": ""},
+        {"role": "assistant", "content": "You were mid-thought."}])
+    sitting = await ensure_sitting(state)
+    assert sitting.recap.startswith("Previous session ended abruptly")
+    await sitting.run_turn("and then?")
+    joined = "\n".join(str(m.get("content") or "")
+                       for m in state.llm.calls[0])
+    assert "what was I saying?" in joined  # verbatim, not summarized
+
+
+def test_clean_close_resumes_nothing_but_recaps(tmp_path):
+    # A distilled sitting rides on as summaries + memory: the reopened
+    # sitting starts with an empty verbatim window and a recap line.
+    state, _ = make_env(tmp_path)
+    state.project.append_chat([
+        {"role": "user", "content": "old talk", "section": ""},
+        {"role": "assistant", "content": "older"}])
+    state.project.write_chat_divider(sessionlog.divider_record(
+        "idle", 1, [], True))
+    sitting = Session(state)
+    assert sitting.history[1:] == []
+    assert sitting.recap.startswith("Last sitting ended (idle)")
+    assert sitting.recap.endswith("— distilled.")
+
+
+def test_recap_event_reaches_the_first_tab(tmp_path):
+    state = ws_state(tmp_path)
+    state.project.append_chat([{"role": "user", "content": "x",
+                                "section": ""}])
+    state.project.write_chat_divider(sessionlog.divider_record(
+        "shutdown", 1, [], True))
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ev = ws.receive_json()
+            assert ev["type"] == "recap"
+            assert ev["text"].startswith("Last sitting ended (shutdown)")
+
+
+def test_hello_carries_the_sitting_anchor(tmp_path):
+    # §8 resync: the client's anchor is view state — hello re-sends the
+    # server's truth, so a restart clears a stale one and a blip keeps it.
+    state = ws_state(tmp_path)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json() == {"type": "hello",
+                                         "client_id": "c1",
+                                         "section": None}
+            ws.send_json({"type": "select_section",
+                          "section": "sections/intro.tex"})
+            assert ws.receive_json()["type"] == "section_selected"
+        # tab blip: the sitting survived, and so does its anchor in hello
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            hello = ws.receive_json()
+            assert hello["type"] == "hello"
+            assert hello["section"] == "sections/intro.tex"
+
+
+def test_pending_diffs_reappear_on_reopen(tmp_path):
+    # §7/§8: a proposed diff is disk truth — the next open re-presents
+    # it through the reconcile path (card back, approval window re-armed
+    # so voice can resolve it).
+    state = ws_state(tmp_path)
+    state.llm = ScriptLlm([tool_step("section_write", WRITE),
+                           text_step("Proposed a tightening.")])
+    seed_gists(state)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            ws.receive_json()
+            ws.send_json({"type": "typed",
+                          "text": "tighten the intro line"})
+            while ws.receive_json()["type"] != "assistant_text":
+                pass
+        state.sitting = None  # the crash shape: sitting gone, no divider
+        with client.websocket_connect("/ws/voice?client=c2") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            # the crash recap rides first, then the re-presented card
+            assert ws.receive_json()["text"].startswith(
+                "Previous session ended abruptly")
+            ev = ws.receive_json()
+            assert ev["type"] == "diff" and ev["diff_id"] == "0000"
+        # (inside the app: lifespan shutdown would end this sitting)
+        assert state.sitting.pending_diffs == [
+            {"diff_id": "0000", "section": "sections/intro.tex"}]
+
+
+def test_heartbeat_does_not_resurrect_an_ended_sitting(tmp_path):
+    # §7: ends are ends. Liveness is liveness — a pong must not open a
+    # new sitting on a project nobody has re-opened.
+    state = ws_state(tmp_path)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            state.sitting = None  # the idle watch ended it
+            ws.send_json({"type": "heartbeat", "rms": 0.1})
+            assert ws.receive_json()["type"] == "pong"
+            assert state.sitting is None
+
+
+@pytest.mark.anyio
+async def test_end_sitting_writes_divider_and_sends_receipt(tmp_path):
+    state, session = make_env(tmp_path)
+    seed_gists(state)
+    events = []
+
+    async def capture(event):
+        events.append(event)
+
+    session.send = capture
+    state.sitting = session
+    await session.run_turn("hi there")
+    await end_sitting(state, "idle")
+    assert state.sitting is None
+    receipt = [e for e in events if e["type"] == "session_ended"]
+    assert receipt and receipt[0]["reason"] == "idle"
+    div = state.project.chat_divider()
+    assert div["reason"] == "idle" and div["turns"] == 1
+    assert div["distilled"] is True  # RecordingLlm answered
+    assert state.project.chat_tail() == []  # verbatim window closed
+
+
+@pytest.mark.anyio
+async def test_distill_fault_keeps_the_tail_for_retry(tmp_path):
+    # vLLM down at the end: the divider lands UNdistilled, so read_tail
+    # does not close the verbatim window — the next sitting resumes the
+    # talk and its end retries the fold (the promise the fault comments
+    # make; §8 degrade, never lose).
+    state, session = make_env(tmp_path)
+    seed_gists(state)
+    events = []
+
+    async def capture(event):
+        events.append(event)
+
+    session.send = capture
+    state.sitting = session
+    await session.run_turn("hi there")
+
+    class DownLlm:
+        async def chat(self, messages, **kwargs):
+            raise RuntimeError("vLLM down")
+
+    state.llm = DownLlm()
+    await end_sitting(state, "shutdown")
+    div = state.project.chat_divider()
+    assert div["distilled"] is False
+    assert state.project.chat_tail()  # window open: the talk is retryable
+    receipt = [e for e in events if e["type"] == "session_ended"]
+    assert receipt[0]["recap"].endswith("distillation was skipped.")
+    nxt = Session(state)
+    assert nxt.recap.startswith("Last sitting's distillation was skipped")
+    assert any(m.get("content") == "hi there" for m in nxt.history)
+
+
+@pytest.mark.anyio
+async def test_empty_model_answer_is_not_distilled(tmp_path):
+    # An empty answer saved nothing — the divider must not claim
+    # "distilled" (the same shape distill_memory already refuses).
+    from phd_helper.server.app import distill_summaries
+    state, _ = make_env(tmp_path)
+
+    class EmptyLlm:
+        async def chat(self, messages, **kwargs):
+            return {"role": "assistant", "content": ""}, [], "   "
+
+    state.llm = EmptyLlm()
+    conv = [{"role": "user", "content": "talk",
+             "section": "sections/intro.tex"}]
+    assert await distill_summaries(state, conv) is False
+
+
+@pytest.mark.anyio
+async def test_message_during_end_waits_for_the_end(tmp_path):
+    # The end race: a message arriving mid-distillation must not spawn a
+    # sitting bound to the pre-end log — it waits, then opens the next
+    # sitting on the closed (divided) file.
+    state, session = make_env(tmp_path)
+    seed_gists(state)
+    state.sitting = session
+    await session.run_turn("hi there")
+
+    class SlowLlm:
+        async def chat(self, messages, **kwargs):
+            await asyncio.sleep(0.05)  # distillation in flight
+            return {"role": "assistant", "content": "ok"}, [], "ok"
+
+    state.llm = SlowLlm()
+    end = asyncio.create_task(end_sitting(state, "idle"))
+    await asyncio.sleep(0.01)  # the end is mid-await
+    fresh = await ensure_sitting(state)
+    assert fresh is not session
+    assert state.project.chat_divider() is not None  # end completed first
+    assert fresh.recap.startswith("Last sitting ended (idle)")
+    await end
+
+
+def test_detach_is_identity_checked(tmp_path):
+    # A refresh reuses the client_id; the old socket's close must not
+    # evict the new one from the fan-out.
+    state, session = make_env(tmp_path)
+    ws1, ws2 = object(), object()
+    session.attach("c", ws1)
+    session.attach("c", ws2)  # refresh: same id, new socket
+    session.detach("c", ws1)  # the OLD handler's finally
+    assert session.sockets.get("c") is ws2
+
+
+@pytest.mark.anyio
+async def test_idle_watch_survives_a_failing_end(tmp_path, monkeypatch):
+    # §8: one locked file must not kill the watchdog for the server's
+    # life — no sitting would ever idle-end again.
+    import phd_helper.server.app as app_mod
+    state, session = make_env(tmp_path)
+    state.config = SimpleNamespace(session_idle_s=0.0)
+    state.sitting = session
+    tried = []
+
+    async def boom(state, reason):
+        tried.append(reason)
+        raise RuntimeError("locked file")
+
+    monkeypatch.setattr(app_mod, "end_sitting", boom)
+    task = asyncio.create_task(app_mod.idle_watch(state, check_s=0.01))
+    await asyncio.sleep(0.05)
+    assert tried  # it fired
+    assert not task.done()  # and the watchdog lived to fire again
+    task.cancel()
+
+
+@pytest.mark.anyio
+async def test_turn_activity_moves_the_idle_clock(tmp_path):
+    # §7: the idle clock rides turns, not the 2 s heartbeat — an open
+    # tab with an absent writer is an idle sitting.
+    state, session = make_env(tmp_path)
+    seed_gists(state)
+    session.last_active = 0.0
+    await session.run_turn("hello")
+    assert session.last_active > 0.0
+
+
+def test_diff_resolution_fans_out_to_every_tab(tmp_path):
+    # #27: the sitting speaks to all attached tabs — a button click in
+    # one tab resolves the card in the other.
+    state = ws_state(tmp_path)
+    state.llm = ScriptLlm([
+        tool_step("section_write", WRITE),
+        text_step("Proposed a tightening.")])
+    seed_gists(state)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as a, \
+             client.websocket_connect("/ws/voice?client=c2") as b:
+            assert a.receive_json()["type"] == "hello"
+            assert b.receive_json()["type"] == "hello"
+            a.send_json({"type": "typed", "text": "tighten the intro line"})
+            for ws in (a, b):  # both tabs see the turn and the diff
+                while ws.receive_json()["type"] != "diff":
+                    pass
+                while ws.receive_json()["type"] != "assistant_text":
+                    pass
+            b.send_json({"type": "reject", "section": "sections/intro.tex",
+                         "diff_id": "0000"})
+            assert b.receive_json()["type"] == "diff_resolved"
+            assert a.receive_json()["type"] == "diff_resolved"
+
+
+def test_project_switch_ends_the_sitting_and_lands_there(tmp_path):
+    state = ws_state(tmp_path)
+    other = tmp_path / "other-paper"
+    (other / "sections").mkdir(parents=True)
+    (other / "main.tex").write_text(
+        "\begin{document}\n\end{document}\n", encoding="utf-8")
+    state.projects_root = tmp_path
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            ws.receive_json()
+            ws.send_json({"type": "typed", "text": "hi"})
+            while ws.receive_json()["type"] != "assistant_text":
+                pass
+        listing = client.get("/projects").json()
+        assert set(listing["projects"]) == {"my-paper", "other-paper"}
+        assert listing["active"] == "my-paper"
+        assert client.post("/projects/activate",
+                           json={"name": "other-paper"}).json() \
+            == {"active": "other-paper"}
+    assert state.project.root.name == "other-paper"
+    assert state.sitting is None  # the switch ended it
+    # The divider and the distillation rode the OLD project (§7: switch
+    # ends the session, distillation runs — before the swap).
+    old = Project(tmp_path / "my-paper")
+    assert old.chat_divider()["reason"] == "switch"
+    assert old.load_memory() == "ok"
+    assert (tmp_path / ".phd-helper-server" / "last_project").is_file()
+
+
+def test_project_activate_rejects_traversal_and_strangers(tmp_path):
+    state = ws_state(tmp_path)
+    state.projects_root = tmp_path
+    with TestClient(create_app(state=state)) as client:
+        assert client.post("/projects/activate",
+                           json={"name": "../secrets"}).status_code == 404
+        assert client.post("/projects/activate",
+                           json={"name": "nope"}).status_code == 404
+    assert state.project.root.name == "my-paper"  # unchanged

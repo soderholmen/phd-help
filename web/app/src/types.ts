@@ -3,7 +3,7 @@
 
 // Server → client events.
 export type ServerEvent =
-  | { type: "hello"; client_id: string }
+  | { type: "hello"; client_id: string; section: string | null }
   | { type: "turn_started" }
   | { type: "assistant_text"; text: string }
   | {
@@ -26,7 +26,9 @@ export type ServerEvent =
   | { type: "armed"; ok: boolean; holder: string | null }
   | { type: "disarmed" }
   | { type: "tts_stopped" }
-  | { type: "section_selected"; section: string | null };
+  | { type: "section_selected"; section: string | null }
+  | { type: "recap"; text: string }
+  | { type: "session_ended"; reason: string; recap: string };
 
 // Client → server control frames (voice.py CONTROL_TYPES).
 export type ControlFrame =

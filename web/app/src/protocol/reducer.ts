@@ -33,10 +33,10 @@ export function reducer(state: ShellState, event: ShellEvent): ShellState {
     case "connection_opened":
       return { ...state, connected: true };
     case "connection_closed":
-      // app.py builds a fresh Session per socket: the anchor and any
-      // pending approvals are gone server-side, so the client must stop
-      // claiming them. The transcript stays visible with a notice —
-      // mid-conversation resume is the §7 cross-session history slice.
+      // §7: the sitting is server-side and survives a blip — the next
+      // connect resumes the same conversation, anchor and approval
+      // window. So the client keeps claiming them; only the socket is
+      // gone. (If the server itself died, the next hello+recap tells it.)
       return withMessage(
         {
           ...state,
@@ -44,14 +44,34 @@ export function reducer(state: ShellState, event: ShellEvent): ShellState {
           turnActive: false,
           armed: false,
           rms: 0,
-          selected: null,
-          pendingDiffs: [],
         },
         "notice",
-        "Connection lost — the agent's context resets on reconnect",
+        "Connection lost — reconnecting; the sitting resumes",
+      );
+    case "recap":
+      // §7: the one-line on-screen recap of how the last sitting ended.
+      return withMessage(state, "notice", event.text);
+    case "session_ended":
+      // The sitting ended (switch/shutdown/idle). The anchor was
+      // sitting-level, so it clears; the diff cards stay — the diffs are
+      // pending on disk and the buttons ride disk truth (§5). Except on
+      // a project switch: those cards belong to the old project's disk
+      // and can never resolve here, so they'd only be noise.
+      return withMessage(
+        {
+          ...state,
+          selected: null,
+          pendingDiffs:
+            event.reason === "switch" ? [] : state.pendingDiffs,
+        },
+        "notice",
+        event.recap,
       );
     case "hello":
-      return { ...state, clientId: event.client_id };
+      // The server's hello carries the sitting's anchor: the client's
+      // copy is view state a server restart can have invalidated, so
+      // the refetch overwrites it (§8 resync).
+      return { ...state, clientId: event.client_id, selected: event.section };
     case "user_send":
       return withMessage(state, "user", event.text, state.selected ?? undefined);
     case "turn_started":
@@ -65,6 +85,11 @@ export function reducer(state: ShellState, event: ShellEvent): ShellState {
         find: event.find,
         replace: event.replace,
       };
+      // A reconnect re-presents the sitting's pending diffs (§7 reopen);
+      // a card already on screen must not double.
+      if (state.pendingDiffs.some((d) => d.diff_id === event.diff_id)) {
+        return state;
+      }
       return { ...state, pendingDiffs: [...state.pendingDiffs, card] };
     }
     case "diff_resolved": {

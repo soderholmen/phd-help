@@ -10,7 +10,7 @@ import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -26,6 +26,7 @@ from phd_helper.endpoint import VoiceEndpoint
 from phd_helper.gists import body_sha, flatten, render_gists, stale_sections
 from phd_helper.ingest import IngestError, Ingestor
 from phd_helper.project import Project
+from phd_helper import sessionlog
 from phd_helper.server.config import REPO_ROOT, load as load_config
 from phd_helper.server.http import HttpFetcher
 from phd_helper.server.llm import LlmClient, LlmError
@@ -52,26 +53,64 @@ SYSTEM_PROMPT = (
 
 
 class Session:
-    """One browser tab's voice connection (§1: one WebSocket per tab)."""
+    """One sitting in a project (SPEC §7): the conversation, the approval
+    window and the §4 anchor, shared by every tab attached to it. Tabs
+    attach and detach freely — a blip or a refresh loses nothing; the
+    sitting ends on project switch, graceful shutdown or ~30 min idle,
+    never on a tab closing. The conversation is the §7 verbatim JSONL."""
 
-    def __init__(self, app_state, client_id: str):
+    def __init__(self, app_state):
         self.state = app_state
-        self.client_id = client_id
-        self.ws: WebSocket | None = None
+        self.sockets: dict[str, WebSocket] = {}
         self.turn_task: asyncio.Task | None = None
         # §1: clicking a tree node anchors the section-scoped discussion;
         # the anchored section's body then rides every turn's context (§4).
+        # Sitting-level, not per-tab: one conversation, one anchor (the
+        # shell keeps its own tree highlight as §7 per-client view state).
         self.selected: str | None = None
-        # §3 approval window: diffs this session proposed that are still
+        # §3 approval window: diffs this sitting proposed that are still
         # pending. While any ride, the next utterance is interpreted
         # against the approval by the agent (the note in _build_context).
         self.pending_diffs: list[dict] = []
+        # §7/§8 reopen: diffs already pending when this sitting opened,
+        # reconciled once (re-anchored or bounced) and re-presented to
+        # every socket that attaches — disk is the truth, the cards ride it.
+        self.pending_sent = False
+        self.live_pending: list = []
+        self.last_active = time.monotonic()
+        self.recap_sent = False
+        project = app_state.project
+        # §7: reopening resumes the same history — the verbatim turns
+        # after the last divider. A clean close leaves none (that talk
+        # rides on as rolling summaries); a crash leaves them all.
+        tail = project.chat_tail()
+        self.recap = sessionlog.recap_line(project.chat_divider(),
+                                           len(tail))
         # The tree is clickable at every depth (§1), so the prompt's
         # section list flattens rather than stopping at the top level.
-        sections = ", ".join(flatten(app_state.project.section_tree()))
-        self.history: list[dict] = [{"role": "system", "content":
-                                     SYSTEM_PROMPT +
-                                     f"\nProject sections: {sections}"}]
+        sections = ", ".join(flatten(project.section_tree()))
+        self.history: list[dict] = [
+            {"role": "system",
+             "content": SYSTEM_PROMPT + f"\nProject sections: {sections}"}
+        ] + tail
+
+    def attach(self, client_id: str, ws: WebSocket) -> None:
+        self.sockets[client_id] = ws
+
+    def detach(self, client_id: str,
+               ws: WebSocket | None = None) -> None:
+        # Identity-checked pop: a refresh reuses the client_id and the
+        # new socket can attach before the old handler's finally runs —
+        # the old close must not evict the live socket.
+        if ws is None or self.sockets.get(client_id) is ws:
+            self.sockets.pop(client_id, None)
+
+    def log(self, msg: dict) -> None:
+        """Append to the in-memory conversation and the §7 verbatim JSONL
+        — the file is the spine, memory is its working copy."""
+        self.history.append(msg)
+        self.state.project.append_chat(
+            [dict(msg, ts=datetime.now().isoformat(timespec="seconds"))])
 
     def sync_pending(self) -> None:
         """Re-read the approval window from disk truth, one pass: a bounced
@@ -183,11 +222,19 @@ class Session:
         return ctx_msg, start
 
     async def send(self, event: dict):
-        if self.ws is not None:
-            await self.ws.send_text(json.dumps(event))
+        # The sitting speaks to every attached tab (§7/#27): a diff
+        # resolved by voice or by another tab's button lands everywhere.
+        text = json.dumps(event)
+        for cid, ws in list(self.sockets.items()):
+            try:
+                await ws.send_text(text)
+            except Exception:
+                self.sockets.pop(cid, None)  # dead socket: prune, keep talking
 
     async def run_turn(self, user_text: str):
         # No queue: one in-flight turn, last utterance wins (§8).
+        self.last_active = time.monotonic()  # §7: turns, not heartbeats,
+        # keep the sitting alive — an open tab with an absent writer idles.
         current = asyncio.current_task()
         if (self.turn_task is not None and self.turn_task is not current
                 and not self.turn_task.done()):
@@ -197,8 +244,8 @@ class Session:
         self.sync_pending()
         # The §7 rolling summaries group a sitting by the section each
         # exchange was anchored to — tag the user message with it.
-        self.history.append({"role": "user", "content": user_text,
-                             "section": self.selected or ""})
+        self.log({"role": "user", "content": user_text,
+                  "section": self.selected or ""})
         await self.send({"type": "turn_started"})
         project = self.state.project
         try:
@@ -217,15 +264,14 @@ class Session:
                     msgs, tools=TOOL_SCHEMAS, offered=OFFERED,
                     validators=make_validators(project))
                 if not valid_calls:
-                    self.history.append({"role": "assistant",
-                                         "content": text or ""})
+                    self.log({"role": "assistant", "content": text or ""})
                     await self.send({"type": "assistant_text", "text": text})
                     # TTS seam: sentence-by-sentence synthesis lands with
                     # the 3090 stack; the stub counts the request.
                     async for _chunk in self.state.tts.synthesize(text):
                         pass  # binary audio frames go out here
                     return
-                self.history.append(msg)  # assistant turn with tool_calls
+                self.log(msg)  # assistant turn with tool_calls
                 for vc in valid_calls:
                     result = await execute_async(
                         vc, project, fetch=self.state.fetch,
@@ -267,15 +313,14 @@ class Session:
                                              "reason": r["reason"],
                                              "text": r["text"]})
                         self.sync_pending()
-                    self.history.append({"role": "tool",
-                                         "tool_call_id": vc.id,
-                                         "content": json.dumps(result)})
+                    self.log({"role": "tool",
+                              "tool_call_id": vc.id,
+                              "content": json.dumps(result)})
             await self.send({"type": "error", "where": "loop",
                              "message": "tool loop budget exhausted"})
         except asyncio.CancelledError:
             # Barge-in while thinking: abort, keep history consistent.
-            self.history.append({"role": "assistant",
-                                 "content": "[interrupted]"})
+            self.log({"role": "assistant", "content": "[interrupted]"})
             await self.send({"type": "turn_interrupted"})
         except LlmError as e:
             # vLLM down, backend up: error inline in chat (§8 matrix).
@@ -292,6 +337,24 @@ class Session:
             self.turn_task.cancel()
 
 
+def load_last_project(root: Path) -> Path | None:
+    """§7: the app lands in the last-used project, server-side, surviving
+    restarts. A stale or removed path degrades to the caller's default."""
+    try:
+        raw = (root / ".phd-helper-server" / "last_project").read_text(
+            encoding="utf-8").strip()
+    except OSError:
+        return None
+    p = (Path(raw) if Path(raw).is_absolute() else root / raw).resolve()
+    return p if p.is_relative_to(root) and (p / "main.tex").is_file() else None
+
+
+def save_last_project(root: Path, path: Path) -> None:
+    d = root / ".phd-helper-server"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "last_project").write_text(str(path), encoding="utf-8")
+
+
 class AppState:
     def __init__(self):
         self.config = load_config()
@@ -304,8 +367,17 @@ class AppState:
         self.endpoint = VoiceEndpoint(
             ping_interval=self.config.ping_interval_s,
             lease_timeout=self.config.lease_timeout_s)
-        # One active project at a time (§7); scaffold ships the sample paper.
-        self.project = Project(REPO_ROOT / "sample_paper")
+        # One active project at a time (§7): the app lands in the
+        # last-used one; the scaffold ships the sample paper as default.
+        self.projects_root = REPO_ROOT
+        self.project = Project(load_last_project(REPO_ROOT)
+                               or REPO_ROOT / "sample_paper")
+        # The project's current sitting (§7), shared by every attached
+        # tab; None between sittings (ended, or nobody has opened yet).
+        self.sitting: Session | None = None
+        # Set while end_sitting distills: ensure_sitting awaits it, so a
+        # message arriving mid-end can't bind the pre-end project/log.
+        self.end_fut: asyncio.Future | None = None
         # One global corpus across projects (§6). The registry is live
         # always; the heavy stack is config-gated (PHD_CORPUS_STACK):
         # "off" degrades per the §8 matrix, "local" runs MinerU + harrier
@@ -412,17 +484,18 @@ MEMORY_PROMPT = (
 MEMORY_TRANSCRIPT_CAP = 12000  # chars of transcript sent to the model
 
 
-async def distill_memory(state, conversation) -> None:
+async def distill_memory(state, conversation) -> bool:
     """§4/§7: fold a finished sitting into paper memory. A fault skips
     the distillation — memory is polish, never an error to surface (§8);
     the next session end retries. The voice door is the memory_write
-    tool; this is the session-end door."""
+    tool; this is the session-end door. The bool feeds the §7 divider's
+    distilled flag — the next open's recap says whether it ran."""
     transcript = "\n".join(
         f"{m['role']}: {m['content']}"
         for m in conversation
         if m.get("role") in ("user", "assistant") and m.get("content"))
     if not transcript.strip():
-        return  # an empty sitting has nothing to distill
+        return True  # an empty sitting has nothing to distill: done
     old = state.project.load_memory()
     try:
         _, _, text = await state.llm.chat(
@@ -432,10 +505,17 @@ async def distill_memory(state, conversation) -> None:
                          f"Session transcript:\n{transcript[:MEMORY_TRANSCRIPT_CAP]}"}],
             thinking=False, max_tokens=900)
     except Exception:
-        return  # vLLM down at disconnect: skip, retry next session end
+        return False  # vLLM down at the end: skip, retry next session end
     text = (text or "").strip()
-    if text:
+    if not text:
+        return False  # the model gave nothing: the divider must not
+                      # claim a distilled sitting (§7 recap honesty)
+    try:
         state.project.save_memory(text)
+    except OSError:
+        return False  # §8: a locked file (Syncthing mid-sync) skips the
+                      # fold; the undistilled tail stays retryable
+    return True
 
 
 SUMMARY_PROMPT = (
@@ -446,14 +526,15 @@ SUMMARY_PROMPT = (
 SUMMARY_TRANSCRIPT_CAP = 8000  # chars of per-section transcript sent
 
 
-async def distill_summaries(state, conversation) -> None:
+async def distill_summaries(state, conversation) -> bool:
     """§7: fold a finished sitting into per-section rolling summaries —
     the residue of conversation that fell out of the verbatim window.
     Sections discussed with nothing selected are nobody's summary; a
-    fault stops the pass, the next session end retries (§8)."""
+    fault stops the pass, the next session end retries (§8). The bool
+    feeds the §7 divider's distilled flag."""
     groups = by_section(conversation)
     if not groups:
-        return
+        return True  # nothing anchored: nothing to roll up
     summaries = state.project.load_summaries()
     for section, lines in groups.items():
         entries = summaries.get(section, [])
@@ -467,12 +548,159 @@ async def distill_summaries(state, conversation) -> None:
                              f"This session:\n{lines[:SUMMARY_TRANSCRIPT_CAP]}"}],
                 thinking=False, max_tokens=300)
         except Exception:
-            return  # keep what landed; retry the rest next session end
+            return False  # keep what landed; retry the rest next end
         text = (text or "").strip()
-        if text:
-            summaries.setdefault(section, []).append(
-                {"date": date.today().isoformat(), "text": text})
+        if not text:
+            return False  # empty for this section: nothing landed, so
+                          # the divider must not claim "distilled"
+        summaries.setdefault(section, []).append(
+            {"date": date.today().isoformat(), "text": text})
+        try:
             state.project.save_summaries(summaries)
+        except OSError:
+            return False  # §8: locked file — undistilled, retryable
+    return True
+
+
+async def ensure_sitting(state) -> Session:
+    """The project's current sitting (§7: starts on open), created on
+    first use. An ended sitting is replaced by the next message's call —
+    but never mid-end: a message arriving while end_sitting distills
+    waits for it, so the replacement binds the ended sitting's project
+    and post-divider log, never the pre-end ones."""
+    end = getattr(state, "end_fut", None)
+    if end is not None and not end.done():
+        try:
+            await end
+        except Exception:
+            pass  # the ending caller reports its own faults; here the
+                  # end simply finished and the fresh sitting follows
+    sitting = getattr(state, "sitting", None)
+    if sitting is None:
+        sitting = state.sitting = Session(state)
+    return sitting
+
+
+async def revalidate_pending(state, sitting: Session,
+                             ws: WebSocket) -> None:
+    """§7/§8 reopen: pending diffs are disk truth, so an attaching socket
+    gets them back through the apply-time hash check / re-anchor path —
+    bounced ones resolve with their reason, live ones become cards again
+    and re-enter the sitting's approval window, so the next utterance is
+    interpreted against them (§3). Reconcile runs once per sitting; the
+    cards are sent to every socket that attaches."""
+    if not sitting.pending_sent:
+        sitting.pending_sent = True
+        by_sec: dict[str, list] = {}
+        for d in state.project.pending.list_all():
+            by_sec.setdefault(d.section_path, []).append(d)
+        for section, ds in by_sec.items():
+            try:
+                text = state.project.read_section(section)
+            except OSError:
+                for d in ds:  # the file itself is gone: nothing to
+                    state.project.reject_pending(section, d.id)  # re-anchor
+                    await ws.send_text(json.dumps(
+                        {"type": "diff_resolved", "diff_id": d.id,
+                         "applied": False,
+                         "reason": "section file is gone", "text": None}))
+                continue
+            for out in state.project.pending.reconcile(section, text):
+                if out.bounce_reason:
+                    await ws.send_text(json.dumps(
+                        {"type": "diff_resolved", "diff_id": out.diff.id,
+                         "applied": False, "reason": out.bounce_reason,
+                         "text": None}))
+                else:
+                    sitting.live_pending.append(out.diff)
+                    if not any(t["diff_id"] == out.diff.id
+                               for t in sitting.pending_diffs):
+                        sitting.pending_diffs.append(
+                            {"diff_id": out.diff.id, "section": section})
+    for d in sitting.live_pending:
+        await ws.send_text(json.dumps(
+            {"type": "diff", "diff_id": d.id, "section": d.section_path,
+             "find": d.patch.find, "replace": d.patch.replace}))
+
+
+async def sync_socket(state, sitting: Session, client_id: str,
+                      ws: WebSocket, on_connect: bool = False) -> None:
+    """§8 resync on (re)open — plain refetch, server is the source of
+    truth: the recap of how the last sitting ended (§7, once per
+    sitting), the anchor (hello carries it on connect; a re-attach to a
+    replacement sitting gets it as an event), and the pending diffs."""
+    sitting.attach(client_id, ws)
+    if sitting.recap and not sitting.recap_sent:
+        # §7: the one-line on-screen recap — on screen only, the
+        # reply-only voice rule holds.
+        sitting.recap_sent = True
+        await ws.send_text(json.dumps({"type": "recap",
+                                       "text": sitting.recap}))
+    if not on_connect:
+        await ws.send_text(json.dumps({"type": "section_selected",
+                                       "section": sitting.selected}))
+    await revalidate_pending(state, sitting, ws)
+
+
+def idle_expired(last_active: float, now: float, timeout_s: float) -> bool:
+    return now - last_active >= timeout_s
+
+
+async def end_sitting(state, reason: str) -> None:
+    """§7: the sitting ends — distill, dated divider, one-line receipt to
+    any tab still attached. A sitting that never saw a user turn leaves
+    no trace. The §8 crash path never reaches here: no divider is
+    written, so the next open resumes the sitting verbatim. A distill
+    FAULT does write the divider, but flagged undistilled — read_tail
+    only closes the verbatim window on a distilled one, so the talk
+    stays resumable and the next sitting's end retries the fold (the
+    promise the distill-fault comments make)."""
+    sitting = getattr(state, "sitting", None)
+    if sitting is None:
+        return
+    state.sitting = None
+    end = asyncio.get_running_loop().create_future()
+    state.end_fut = end  # messages arriving mid-distill wait (ensure_sitting)
+    try:
+        sitting.cancel_turn()
+        conversation = sitting.history[1:]
+        turns = [m for m in conversation if m.get("role") == "user"]
+        if not turns:
+            return
+        mem_ok = await distill_memory(state, conversation)
+        sum_ok = await distill_summaries(state, conversation)
+        sections = {m["section"] for m in turns if m.get("section")}
+        divider = sessionlog.divider_record(reason, len(turns), sections,
+                                            mem_ok and sum_ok)
+        try:
+            state.project.write_chat_divider(divider)
+        except OSError:
+            pass  # §8: a locked file loses the divider, not the sitting
+                  # — with no divider the tail stays verbatim anyway
+        await sitting.send({"type": "session_ended", "reason": reason,
+                            "recap": sessionlog.recap_line(
+                                divider["divider"], 0)})
+    finally:
+        state.end_fut = None
+        if not end.done():
+            end.set_result(None)
+
+
+async def idle_watch(state, check_s: float = 5.0) -> None:
+    """§7: ~30 min idle ends the sitting (distillation runs). Turn
+    activity — not heartbeats — resets the clock: an open tab with an
+    absent writer is an idle sitting."""
+    while True:
+        await asyncio.sleep(check_s)
+        sitting = getattr(state, "sitting", None)
+        if sitting is not None and idle_expired(
+                sitting.last_active, time.monotonic(),
+                state.config.session_idle_s):
+            try:
+                await end_sitting(state, "idle")
+            except Exception:
+                pass  # §8: the watchdog outlives one failed ending —
+                      # a dead watchdog means no sitting ever ends again
 
 
 
@@ -529,8 +757,21 @@ def create_app(state: "AppState | None" = None,
         state.corpus.reconcile_startup()
         if state.ingestor is not None and state.ingestor.runnable():
             spawn(state, state.ingestor.drain_queued())
+        # A plain task, not spawn(): the watchdog must not join the
+        # ingest-task set that tests (and shutdown) await to completion.
+        watch = (asyncio.create_task(idle_watch(state))
+                 if getattr(state, "config", None) is not None else None)
         yield
-        await state.http.aclose()  # release the shared client on shutdown
+        # §7: graceful shutdown ends the sitting (distillation runs,
+        # divider lands). An ungraceful crash never reaches here — the
+        # next open's recap notes the abrupt end, resumed verbatim.
+        if watch is not None:
+            watch.cancel()
+        try:
+            await end_sitting(state, "shutdown")
+        finally:
+            # A faulting ending must not leak the shared HTTP client.
+            await state.http.aclose()  # release the shared client on shutdown
 
     app = FastAPI(title="phd-helper", lifespan=lifespan)
     app.state.phd = state
@@ -622,92 +863,152 @@ def create_app(state: "AppState | None" = None,
     async def voice(ws: WebSocket):
         await ws.accept()
         client_id = ws.query_params.get("client", "anon")
-        session = Session(state, client_id)
-        session.ws = ws
-        now = time.monotonic()
-        state.endpoint.heartbeat(client_id, now)
-        await session.send({"type": "hello", "client_id": client_id})
+        state.endpoint.heartbeat(client_id, time.monotonic())
+        sitting = None
         try:
+            sitting = await ensure_sitting(state)
+            # hello carries the sitting's anchor: the client's own copy
+            # is view state that a server restart can have invalidated —
+            # the server's answer is the truth it refetches to (§8).
+            await ws.send_text(json.dumps({"type": "hello",
+                                           "client_id": client_id,
+                                           "section": sitting.selected}))
+            await sync_socket(state, sitting, client_id, ws,
+                              on_connect=True)
             while True:
                 frame = await ws.receive()
                 if frame["type"] == "websocket.disconnect":
                     break
                 if (data := frame.get("bytes")) is not None:
-                    for final in state.stt.feed(data):
-                        session.turn_task = asyncio.create_task(
-                            session.run_turn(final))
+                    finals = state.stt.feed(data)
+                    if finals:
+                        # Voice opens a sitting exactly like text does:
+                        # after an idle-end the mic must not run a turn
+                        # on the ended sitting — re-resolve, then attach.
+                        sitting = await ensure_sitting(state)
+                        if sitting.sockets.get(client_id) is not ws:
+                            await sync_socket(state, sitting, client_id, ws)
+                        for final in finals:
+                            sitting.turn_task = asyncio.create_task(
+                                sitting.run_turn(final))
                     continue
                 if (text := frame.get("text")) is None:
                     continue
                 try:
                     msg = parse_control(text)
                 except ValueError as e:
-                    await session.send({"type": "error", "where": "control",
-                                        "message": str(e)})
+                    await ws.send_text(json.dumps(
+                        {"type": "error", "where": "control",
+                         "message": str(e)}))
                     continue
-                await dispatch(session, msg)
+                if msg["type"] == "heartbeat":
+                    # One mechanism, three consumers (§8): liveness,
+                    # meter, watchdog. Liveness needs no sitting — a
+                    # heartbeat must not resurrect an ended one — but a
+                    # live sitting keeps its tabs attached (fan-out),
+                    # and a tab whose sitting was replaced under it
+                    # (project switch) re-syncs here without speaking.
+                    state.endpoint.heartbeat(client_id, time.monotonic())
+                    cur = getattr(state, "sitting", None)
+                    if cur is not None and \
+                            cur.sockets.get(client_id) is not ws:
+                        sitting = cur
+                        await sync_socket(state, cur, client_id, ws)
+                    await ws.send_text(json.dumps(
+                        {"type": "pong", "rms": msg.get("rms", 0.0)}))
+                    continue
+                # The sitting may have ended under this tab (idle,
+                # switch); the next message opens the next sitting.
+                sitting = await ensure_sitting(state)
+                if sitting.sockets.get(client_id) is not ws:
+                    await sync_socket(state, sitting, client_id, ws)
+                await dispatch(state, sitting, msg, client_id, ws)
         except WebSocketDisconnect:
             pass
         finally:
-            session.cancel_turn()
-            session.ws = None
-            # §7: the sitting ends here until the web shell owns session
-            # semantics (project switch, 30-min idle) — distill memory
-            # and per-section rolling summaries in the background; a tab
-            # refresh just folds a shorter sitting.
-            sitting = session.history[1:]
-            spawn(state, distill_memory(state, sitting))
-            spawn(state, distill_summaries(state, sitting))
+            # §7: a tab closing is not a session end. The sitting — and
+            # any in-flight turn — survives for the other tabs and the
+            # next reconnect; only the socket detaches.
+            if sitting is not None:
+                sitting.detach(client_id, ws)
 
-    async def dispatch(session: Session, msg: dict):
+    async def dispatch(state, sitting: Session, msg: dict, client_id: str,
+                       ws: WebSocket):
         now = time.monotonic()
         kind = msg["type"]
-        if kind == "heartbeat":
-            state.endpoint.heartbeat(session.client_id, now)
-            # One mechanism, three consumers (§8): liveness, meter, watchdog.
-            await session.send({"type": "pong", "rms": msg.get("rms", 0.0)})
-        elif kind == "arm":
-            ok = state.endpoint.arm(session.client_id, now)
-            await session.send({"type": "armed", "ok": ok,
-                                "holder": state.endpoint.endpoint(now)})
+        if kind == "arm":
+            ok = state.endpoint.arm(client_id, now)
+            await ws.send_text(json.dumps(
+                {"type": "armed", "ok": ok,
+                 "holder": state.endpoint.endpoint(now)}))
         elif kind == "disarm":
-            session.cancel_turn()
-            await session.send({"type": "disarmed"})
+            sitting.cancel_turn()
+            await ws.send_text(json.dumps({"type": "disarmed"}))
         elif kind == "typed":
             text = str(msg.get("text", "")).strip()
             if text:
-                session.turn_task = asyncio.create_task(
-                    session.run_turn(text))
+                sitting.turn_task = asyncio.create_task(
+                    sitting.run_turn(text))
         elif kind == "barge_in":
             # Qualifying interrupt: stop TTS now, abort thinking (§3).
-            session.cancel_turn()
-            await session.send({"type": "tts_stopped"})
+            # Fan-out: every tab's playback stops with the sitting's turn.
+            sitting.cancel_turn()
+            await sitting.send({"type": "tts_stopped"})
         elif kind == "select_section":
             # §1: clicking a tree node anchors the section-scoped
             # discussion; the body then rides every later turn (§4).
+            # Fan-out: one sitting, one anchor — every tree follows.
             path = str(msg.get("section", ""))
-            if session.select_section(path):
-                await session.send({"type": "section_selected",
-                                    "section": session.selected})
+            if sitting.select_section(path):
+                await sitting.send({"type": "section_selected",
+                                    "section": sitting.selected})
             else:
-                await session.send({"type": "error", "where": "control",
-                                    "message": f"no such section: {path}"})
+                await ws.send_text(json.dumps(
+                    {"type": "error", "where": "control",
+                     "message": f"no such section: {path}"}))
         elif kind in ("approve", "reject"):
             section, diff_id = msg.get("section"), msg.get("diff_id")
             if kind == "approve":
                 result = state.project.apply_pending(section, diff_id)
-                await session.send({
+                await sitting.send({
                     "type": "diff_resolved", "diff_id": diff_id,
                     "applied": result.applied, "reason": result.reason,
                     "text": result.text})
             else:
                 state.project.reject_pending(section, diff_id)
-                await session.send({"type": "diff_resolved",
+                await sitting.send({"type": "diff_resolved",
                                     "diff_id": diff_id, "applied": False,
                                     "reason": "discarded", "text": None})
             # The button closed (or bounced) the window — the note follows
             # disk truth, same as the voice path (§3).
-            session.sync_pending()
+            sitting.sync_pending()
+
+    # -- projects (SPEC §7): server-side list, one active at a time;
+    # switching ends the sitting (distillation runs) and lands there,
+    # remembered across restarts. New/Import are later slices.
+
+    @app.get("/projects")
+    async def projects():
+        root = getattr(state, "projects_root", REPO_ROOT)
+        names = sorted(d.name for d in root.iterdir()
+                       if d.is_dir() and not d.name.startswith((".", "_"))
+                       and (d / "main.tex").is_file())
+        return {"projects": names, "active": state.project.root.name}
+
+    @app.post("/projects/activate")
+    async def project_activate(request: Request):
+        root = getattr(state, "projects_root", REPO_ROOT)
+        body = await request.json()
+        name = str(body.get("name", ""))
+        target = (root / name).resolve() if name else None
+        if (target is None or not target.is_relative_to(root)
+                or not (target / "main.tex").is_file()):
+            return JSONResponse({"error": f"no such project: {name}"},
+                                status_code=404)
+        await end_sitting(state, "switch")  # distills before the swap
+        state.project = Project(target)
+        save_last_project(root, target)
+        return {"active": target.name}
 
     # Private-CA root cert for devices to install (public half only; the CA
     # key never leaves certs/, which is gitignored).

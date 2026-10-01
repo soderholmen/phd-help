@@ -9,7 +9,10 @@ const fold = (...events: Parameters<typeof reducer>[1][]) =>
 
 describe("connection", () => {
   it("tracks open/close and clears turn + arming on close", () => {
-    const open = fold({ type: "connection_opened" }, { type: "hello", client_id: "c1" });
+    const open = fold(
+      { type: "connection_opened" },
+      { type: "hello", client_id: "c1", section: null },
+    );
     expect(open).toMatchObject({ connected: true, clientId: "c1" });
     const busy = fold(
       { type: "connection_opened" },
@@ -20,7 +23,7 @@ describe("connection", () => {
     expect(busy).toMatchObject({ connected: false, turnActive: false, armed: false, rms: 0 });
   });
 
-  it("close drops the anchor and pending diffs — the server's Session is fresh per socket", () => {
+  it("close keeps the anchor and cards — the sitting is server-side (§7)", () => {
     const s = fold(
       { type: "section_selected", section: "sections/intro.tex" },
       {
@@ -32,17 +35,96 @@ describe("connection", () => {
       },
       { type: "connection_closed" },
     );
-    // app.py builds a new Session per WS connect: selected=None, no
-    // pending diffs re-presented yet (§7 slice). Keeping them client-
-    // side would claim an anchor and an approval the server doesn't have.
-    expect(s.selected).toBeNull();
-    expect(s.pendingDiffs).toEqual([]);
-    // The visible transcript stays (the user's record), but a notice
-    // says the agent's own context reset — until §7 resume lands.
+    // The sitting survives a blip: reconnect resumes the same
+    // conversation, anchor and approval window. Dropping them client-
+    // side would deny a resume the server is honoring.
+    expect(s.selected).toBe("sections/intro.tex");
+    expect(s.pendingDiffs).toHaveLength(1);
     expect(s.messages.at(-1)).toMatchObject({
       role: "notice",
-      text: "Connection lost — the agent's context resets on reconnect",
+      text: "Connection lost — reconnecting; the sitting resumes",
     });
+  });
+
+  it("a recap rides the transcript as a notice (§7)", () => {
+    const s = fold({
+      type: "recap",
+      text: "Previous session ended abruptly — resumed 2 verbatim turns.",
+    });
+    expect(s.messages.at(-1)).toMatchObject({
+      role: "notice",
+      text: "Previous session ended abruptly — resumed 2 verbatim turns.",
+    });
+  });
+
+  it("session_ended clears the anchor, keeps the cards, notices the recap", () => {
+    const s = fold(
+      { type: "section_selected", section: "sections/intro.tex" },
+      {
+        type: "diff",
+        diff_id: "d1",
+        section: "sections/intro.tex",
+        find: "a",
+        replace: "b",
+      },
+      {
+        type: "session_ended",
+        reason: "idle",
+        recap: "Last sitting ended (idle) on 2026-10-01: 3 turns — distilled.",
+      },
+    );
+    // The anchor was sitting-level (gone with it); the diff is pending
+    // on disk and its button rides disk truth, so the card stays.
+    expect(s.selected).toBeNull();
+    expect(s.pendingDiffs).toHaveLength(1);
+    expect(s.messages.at(-1)?.text).toContain("Last sitting ended (idle)");
+  });
+
+  it("a switch drops the old project's cards — they can never resolve here", () => {
+    const s = fold(
+      {
+        type: "diff",
+        diff_id: "d1",
+        section: "sections/intro.tex",
+        find: "a",
+        replace: "b",
+      },
+      {
+        type: "session_ended",
+        reason: "switch",
+        recap: "Last sitting ended (switch) on 2026-10-01: 2 turns — distilled.",
+      },
+    );
+    expect(s.pendingDiffs).toEqual([]);
+  });
+
+  it("hello carries the sitting's anchor — the server's answer is truth (§8)", () => {
+    const stale = fold({ type: "section_selected", section: "sections/old.tex" });
+    // A server restart kept the client's view state but not the sitting:
+    // hello's null clears the stale anchor; a blip's hello re-sends it.
+    const restarted = reducer(stale, { type: "hello", client_id: "c1", section: null });
+    expect(restarted.selected).toBeNull();
+    const resumed = reducer(stale, {
+      type: "hello",
+      client_id: "c1",
+      section: "sections/intro.tex",
+    });
+    expect(resumed.selected).toBe("sections/intro.tex");
+  });
+});
+
+describe("reopen re-presentation", () => {
+  const card = {
+    type: "diff" as const,
+    diff_id: "d1",
+    section: "sections/intro.tex",
+    find: "old",
+    replace: "new",
+  };
+
+  it("a re-presented diff never doubles a card already on screen", () => {
+    const s = fold(card, card);
+    expect(s.pendingDiffs).toHaveLength(1);
   });
 });
 

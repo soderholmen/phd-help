@@ -12,8 +12,14 @@ keys.txt
 # Local TLS material (private CA + server key) — never commit
 certs/
 
+# Live-smoke scratch paper (used by .probe/ scripts)
+.smoke-paper/
+
 # Per-project app state (SPEC §7) — rides Syncthing, never committed
 .phd-helper/
+
+# Server-side app state (last-used project, §7) — never committed
+.phd-helper-server/
 
 # Build artifacts
 *.egg-info/

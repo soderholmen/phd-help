@@ -28,6 +28,17 @@ def _context_budget() -> int:
             f"PHD_CONTEXT_BUDGET must be an integer, got {raw!r}") from None
 
 
+def _session_idle() -> float:
+    # SPEC §7: ~30 min idle ends a sitting. Parsed at construction, like
+    # the budget — a typo must fail Config(), not every importer.
+    raw = os.environ.get("PHD_SESSION_IDLE_S", "1800")
+    try:
+        return float(raw)
+    except ValueError:
+        raise ValueError(
+            f"PHD_SESSION_IDLE_S must be a number, got {raw!r}") from None
+
+
 def _read_key_store(name):
     try:
         for line in KEY_STORE.read_text(encoding="utf-8").splitlines():
@@ -53,6 +64,8 @@ class Config:
     # SPEC §8 heartbeat cadence.
     ping_interval_s: float = 2.0
     lease_timeout_s: float = 60.0
+    # SPEC §7: a sitting ends after this much idle (no user turn).
+    session_idle_s: float = field(default_factory=_session_idle)
     # SPEC §4 per-turn assembly budget (approx tokens). A cost/focus knob
     # for the assembly — window-agnostic priority, not a window cap; the
     # current exchange's tool round-trips ride outside it (trimming them

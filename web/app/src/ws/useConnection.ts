@@ -1,8 +1,8 @@
 // One WebSocket per tab (SPEC §1), thin over the reducer: connect with
 // reconnect, parse server events into dispatch, and carry the 2 s
 // heartbeat that feeds liveness, the meter and the lease watchdog (§8).
-// A blip starts a fresh server Session — the reducer's connection_closed
-// fold says so; mid-conversation resume is the §7 slice.
+// A blip loses only the socket: the §7 sitting is server-side and the
+// reconnect resumes it (hello re-sends the anchor, cards ride disk truth).
 import { useEffect, useRef } from "react";
 import { heartbeat } from "../protocol/frames";
 import type { ControlFrame, ServerEvent, ShellEvent } from "../types";
