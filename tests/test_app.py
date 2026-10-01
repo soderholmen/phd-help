@@ -3,11 +3,15 @@ turn-error containment. The voice loop itself is proven end-to-end against
 live vLLM (§2); this file covers what only the app owns.
 """
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 from types import SimpleNamespace
 
 from phd_helper.corpus import Corpus
+from phd_helper.gists import body_sha
+from phd_helper.toolcall import ValidCall
 from phd_helper.endpoint import VoiceEndpoint
 from phd_helper.project import Project
 from phd_helper.server.app import Session, create_app
@@ -635,3 +639,217 @@ async def test_the_sent_request_carries_exactly_one_system_message(tmp_path):
     assert [i for i, m in enumerate(msgs) if m["role"] == "system"] == [0]
     assert "phd-helper" in msgs[0]["content"]      # the prompt
     assert "Intro body prose" in msgs[0]["content"]  # the §4 context
+
+
+# -- approval-window voice (SPEC §3) ------------------------------------------
+# While a diff is pending, the next utterance is interpreted against the
+# approval by the agent (never string-matched): the pending note rides the
+# context, pending_decide resolves, clearly-neither keeps the diff pending.
+
+
+def tool_step(name, args, cid="t1"):
+    return ({"role": "assistant", "content": None,
+             "tool_calls": [{"id": cid, "type": "function",
+                             "function": {"name": name,
+                                          "arguments": json.dumps(args)}}]},
+            [ValidCall(id=cid, name=name, args=args)], "")
+
+
+def text_step(text):
+    return {"role": "assistant", "content": text}, [], text
+
+
+class ScriptLlm:
+    def __init__(self, script):
+        self.script = list(script)
+        self.calls: list[list[dict]] = []
+
+    async def chat(self, messages, **kwargs):
+        self.calls.append([dict(m) for m in messages])
+        return self.script.pop(0) if self.script else text_step("(end)")
+
+
+WRITE = {"section": "sections/intro.tex", "find": "Intro body prose.",
+         "replace": "Intro prose, tightened."}
+
+
+def seed_gists(state):
+    """Fresh projects have no gists, and _build_context kicks a background
+    refresh — which would steal ScriptLlm steps. Seed a fresh cache."""
+    state.project.save_gists({p: {"sha": body_sha(b), "gist": "seeded"}
+                              for p, b in state.project.files().items()})
+
+
+def pending_env(tmp_path, script):
+    state, session = make_env(tmp_path)
+    state.llm = ScriptLlm(script)
+    seed_gists(state)
+    events: list[dict] = []
+
+    async def capture(event):
+        events.append(event)
+
+    session.send = capture
+    return state, session, events
+
+
+@pytest.mark.anyio
+async def test_voice_apply_resolves_the_pending_diff(tmp_path):
+    state, session, events = pending_env(tmp_path, [
+        tool_step("section_write", WRITE),
+        text_step("Proposed a tightening."),
+        tool_step("pending_decide", {"diff_id": "0000", "decision": "apply"},
+                  "t2"),
+        text_step("Applied."),
+    ])
+    await session.run_turn("tighten the intro line")
+    diff = next(e for e in events if e["type"] == "diff")
+    assert [(t["diff_id"], t["section"]) for t in session.pending_diffs] \
+        == [(diff["diff_id"], "sections/intro.tex")]
+    events.clear()
+
+    await session.run_turn("apply it")
+
+    # The pending note rode the turn: the model saw the id it addressed.
+    assert diff["diff_id"] in state.llm.calls[2][0]["content"]
+    resolved = next(e for e in events if e["type"] == "diff_resolved")
+    assert resolved["diff_id"] == diff["diff_id"]
+    assert resolved["applied"] is True
+    assert session.pending_diffs == []
+    assert "Intro prose, tightened." in \
+        state.project.read_section("sections/intro.tex")
+
+
+@pytest.mark.anyio
+async def test_clearly_neither_keeps_the_diff_pending(tmp_path):
+    state, session, events = pending_env(tmp_path, [
+        tool_step("section_write", WRITE),
+        text_step("Proposed a tightening."),
+        text_step("It is a transformer architecture paper."),
+    ])
+    await session.run_turn("tighten the intro line")
+    events.clear()
+
+    await session.run_turn("what is this paper even about?")
+
+    assert not [e for e in events if e["type"] == "diff_resolved"]
+    assert len(session.pending_diffs) == 1  # still awaiting approval
+    assert "pending_decide" in state.llm.calls[2][0]["content"]
+
+
+@pytest.mark.anyio
+async def test_voice_amend_proposes_the_replacement_then_discards(tmp_path):
+    amended = dict(WRITE, replace="Intro prose, tightened differently.")
+    state, session, events = pending_env(tmp_path, [
+        tool_step("section_write", WRITE),
+        text_step("Proposed a tightening."),
+        tool_step("section_write", amended, "t2"),
+        tool_step("pending_decide", {"diff_id": "0000",
+                                     "decision": "discard"}, "t3"),
+        text_step("Replaced with the amended version."),
+    ])
+    await session.run_turn("tighten the intro line")
+    first = next(e for e in events if e["type"] == "diff")
+    events.clear()
+
+    await session.run_turn("actually make it tighter differently")
+
+    resolved = next(e for e in events if e["type"] == "diff_resolved")
+    assert resolved["diff_id"] == first["diff_id"]
+    assert resolved["applied"] is False and resolved["reason"] == "discarded"
+    new_diffs = [e for e in events if e["type"] == "diff"]
+    assert [d["diff_id"] for d in new_diffs] == ["0001"]
+    assert [(t["diff_id"], t["section"]) for t in session.pending_diffs] \
+        == [("0001", "sections/intro.tex")]
+
+
+@pytest.mark.anyio
+async def test_voice_apply_bounce_keeps_the_diff_tracked(tmp_path):
+    state, session, events = pending_env(tmp_path, [
+        tool_step("section_write", WRITE),
+        text_step("Proposed a tightening."),
+        tool_step("pending_decide", {"diff_id": "0000", "decision": "apply"},
+                  "t2"),
+        text_step("That bounced — the file changed under it."),
+    ])
+    await session.run_turn("tighten the intro line")
+    state.project.write_section("sections/intro.tex",
+                                "User rewrote the file entirely.\n")
+    events.clear()
+
+    await session.run_turn("apply it")
+
+    resolved = next(e for e in events if e["type"] == "diff_resolved")
+    assert resolved["applied"] is False and resolved["reason"]
+    # The diff is still pending on disk, so the note must still carry it.
+    assert len(session.pending_diffs) == 1
+
+
+def test_client_reject_clears_the_approval_window(tmp_path):
+    state, _ = make_env(tmp_path)
+    state.llm = ScriptLlm([
+        tool_step("section_write", WRITE),
+        text_step("Proposed a tightening."),
+        text_step("The budget is 4096 tokens."),
+    ])
+    seed_gists(state)
+    state.endpoint = VoiceEndpoint(ping_interval=2.0, lease_timeout=60.0)
+    state.stt = StubStt()
+    state.http = FakeHttp()
+    state.ingestor = None
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "typed", "text": "tighten the intro line"})
+            while ws.receive_json()["type"] != "assistant_text":
+                pass
+            ws.send_json({"type": "reject", "section": "sections/intro.tex",
+                          "diff_id": "0000"})
+            assert ws.receive_json()["type"] == "diff_resolved"
+            ws.send_json({"type": "typed", "text": "what is the budget?"})
+            while ws.receive_json()["type"] != "assistant_text":
+                pass
+    # The turn after the client-side reject sees no pending note.
+    assert "pending_decide" not in state.llm.calls[2][0]["content"]
+
+
+@pytest.mark.anyio
+async def test_voice_apply_all_only_touches_this_sessions_window(tmp_path):
+    state, session, events = pending_env(tmp_path, [
+        tool_step("section_write", WRITE),
+        text_step("Proposed a tightening."),
+        tool_step("pending_decide", {"diff_id": "all", "decision": "apply"},
+                  "t2"),
+        text_step("Applied."),
+    ])
+    await session.run_turn("tighten the intro line")
+    # A diff from an earlier sitting: on disk, never shown in this window.
+    state.project.propose_patch("sections/intro.tex", "Intro body prose.",
+                                "Old sitting's idea.")
+    events.clear()
+
+    await session.run_turn("apply all")
+
+    resolved = [e for e in events if e["type"] == "diff_resolved"]
+    assert [e["diff_id"] for e in resolved] == ["0000"]
+    assert state.project.list_pending("sections/intro.tex")  # 0001 untouched
+    assert "Old sitting's idea." not in \
+        state.project.read_section("sections/intro.tex")
+
+
+@pytest.mark.anyio
+async def test_note_follows_disk_truth_when_resolved_elsewhere(tmp_path):
+    state, session, events = pending_env(tmp_path, [
+        tool_step("section_write", WRITE),
+        text_step("Proposed a tightening."),
+        text_step("Nothing is pending now."),
+    ])
+    await session.run_turn("tighten the intro line")
+    assert len(session.pending_diffs) == 1
+    # Resolved outside this session (another tab's button, cleanup).
+    state.project.reject_pending("sections/intro.tex", "0000")
+
+    await session.run_turn("what about the results?")
+
+    assert session.pending_diffs == []
+    assert "PENDING DIFFS" not in state.llm.calls[2][0]["content"]

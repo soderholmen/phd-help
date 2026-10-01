@@ -62,12 +62,54 @@ class Session:
         # §1: clicking a tree node anchors the section-scoped discussion;
         # the anchored section's body then rides every turn's context (§4).
         self.selected: str | None = None
+        # §3 approval window: diffs this session proposed that are still
+        # pending. While any ride, the next utterance is interpreted
+        # against the approval by the agent (the note in _build_context).
+        self.pending_diffs: list[dict] = []
         # The tree is clickable at every depth (§1), so the prompt's
         # section list flattens rather than stopping at the top level.
         sections = ", ".join(flatten(app_state.project.section_tree()))
         self.history: list[dict] = [{"role": "system", "content":
                                      SYSTEM_PROMPT +
                                      f"\nProject sections: {sections}"}]
+
+    def sync_pending(self) -> None:
+        """Re-read the approval window from disk truth, one pass: a bounced
+        apply leaves its diff pending, and a diff resolved elsewhere (other
+        tab, cleanup) must drop out — tracking follows the registry, never
+        the decisions made."""
+        live = {d.id for d in self.state.project.pending.list_all()}
+        self.pending_diffs = [t for t in self.pending_diffs
+                              if t["diff_id"] in live]
+
+    def _pending_note(self) -> str:
+        """The §3 approval-window note: what is pending, and how to read
+        the next utterance against it. Interpretation is the agent's job —
+        the note carries the ids, never a string-matching rule. The lines
+        are read from disk truth, so a bounced apply plus user edits can
+        never show a find anchor that no longer exists."""
+        if not self.pending_diffs:
+            return ""
+        tracked = {t["diff_id"] for t in self.pending_diffs}
+        lines = [
+            f"- diff {d.id} ({d.section_path}): "
+            f"find: {d.patch.find[:120]!r} -> "
+            f"replace: {d.patch.replace[:120]!r}"
+            for d in self.state.project.pending.list_all()
+            if d.id in tracked]
+        if not lines:
+            return ""
+        return ("PENDING DIFFS AWAITING APPROVAL:\n" + "\n".join(lines) +
+                "\nThe user's utterance may be about these — interpret it "
+                "against the approval, never by string matching: apply -> "
+                "pending_decide(diff_id, 'apply'); discard -> "
+                "pending_decide(diff_id, 'discard'); 'apply all' -> "
+                "pending_decide('all', 'apply'). To amend: propose the "
+                "amended patch with section_write first; once it is "
+                "pending, discard the superseded diff with "
+                "pending_decide(diff_id, 'discard'). If the utterance is "
+                "clearly about neither, just answer — the diffs stay "
+                "pending.")
 
     def select_section(self, path: str) -> bool:
         if not path:
@@ -132,6 +174,11 @@ class Session:
         # summary — empties filtered).
         head = ctx.parts[:len(ctx.parts) - ctx.conversation_kept]
         content = "\n\n".join(p for p in head if p)
+        # The approval-window note rides outside the budget: it is small,
+        # capped, and dropping it would silently close the window (§3).
+        note = self._pending_note()
+        if note:
+            content = f"{content}\n\n{note}" if content else note
         ctx_msg = {"role": "system", "content": content} if content else None
         return ctx_msg, start
 
@@ -145,6 +192,9 @@ class Session:
         if (self.turn_task is not None and self.turn_task is not current
                 and not self.turn_task.done()):
             self.turn_task.cancel()
+        # The window may have closed since the last turn (another tab's
+        # button, cleanup) — the note must read disk truth, not a mirror.
+        self.sync_pending()
         # The §7 rolling summaries group a sitting by the section each
         # exchange was anchored to — tag the user message with it.
         self.history.append({"role": "user", "content": user_text,
@@ -183,18 +233,40 @@ class Session:
                         openalex_mailto=self.state.config.openalex_mailto,
                         corpus=self.state.corpus,
                         store=self.state.corpus_store,
-                        autojoin=lambda ids: autojoin(self.state, ids))
+                        autojoin=lambda ids: autojoin(self.state, ids),
+                        # Voice decides only inside this session's window:
+                        # the user is asked to approve what they have seen.
+                        window={t["diff_id"]
+                                for t in self.pending_diffs})
                     if result.get("status") == "pending":
                         # One-at-a-time diff awaiting approval (§5). The
                         # result's find/replace are the final ones (cite_add
                         # rewrites the \\cite key); section_write has none.
+                        find = result.get("find", vc.args["find"])
+                        replace = result.get("replace",
+                                            vc.args["replace"])
                         await self.send({"type": "diff",
                                          "diff_id": result["diff_id"],
                                          "section": result["section"],
-                                         "find": result.get("find",
-                                                            vc.args["find"]),
-                                         "replace": result.get("replace",
-                                                               vc.args["replace"])})
+                                         "find": find, "replace": replace})
+                        # The approval window opens: later turns' notes
+                        # carry this diff until it resolves (§3). Only the
+                        # id/section are mirrored — the note reads the
+                        # patch itself from disk truth.
+                        self.pending_diffs.append(
+                            {"diff_id": result["diff_id"],
+                             "section": result["section"]})
+                    if result.get("status") == "resolved":
+                        # §3: the agent interpreted the utterance against
+                        # the approval — the card resolves exactly as if
+                        # the button had been clicked.
+                        for r in result["resolutions"]:
+                            await self.send({"type": "diff_resolved",
+                                             "diff_id": r["diff_id"],
+                                             "applied": r["applied"],
+                                             "reason": r["reason"],
+                                             "text": r["text"]})
+                        self.sync_pending()
                     self.history.append({"role": "tool",
                                          "tool_call_id": vc.id,
                                          "content": json.dumps(result)})
@@ -633,6 +705,9 @@ def create_app(state: "AppState | None" = None,
                 await session.send({"type": "diff_resolved",
                                     "diff_id": diff_id, "applied": False,
                                     "reason": "discarded", "text": None})
+            # The button closed (or bounced) the window — the note follows
+            # disk truth, same as the voice path (§3).
+            session.sync_pending()
 
     # Private-CA root cert for devices to install (public half only; the CA
     # key never leaves certs/, which is gitignored).

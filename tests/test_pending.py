@@ -63,3 +63,53 @@ def test_resolving_a_pending_diff_removes_it(tmp_path):
     store.resolve("sections/s.tex", pid)
 
     assert store.list_pending("sections/s.tex") == []
+
+
+# -- globally unique ids + list_all (SPEC §3 approval window) ----------------
+# Voice addresses a diff by its id ("apply 0002"), and the shell's reducer
+# keys cards by diff_id alone — ids must be unique across sections.
+
+
+def test_diff_ids_are_unique_across_sections(tmp_path):
+    store = PendingDiffs(tmp_path / ".phd-helper")
+    a = store.propose("sections/a.tex",
+                      AnchoredPatch("x\n", "X\n", section_hash("x\n")), "X\n")
+    b = store.propose("sections/b.tex",
+                      AnchoredPatch("y\n", "Y\n", section_hash("y\n")), "Y\n")
+
+    assert a != b
+
+
+def test_list_all_returns_every_pending_diff_with_its_section(tmp_path):
+    store = PendingDiffs(tmp_path / ".phd-helper")
+    a = store.propose("sections/a.tex",
+                      AnchoredPatch("x\n", "X\n", section_hash("x\n")), "X\n")
+    b = store.propose("sections/deep/b.tex",
+                      AnchoredPatch("y\n", "Y\n", section_hash("y\n")), "Y\n")
+
+    found = {(d.id, d.section_path) for d in store.list_all()}
+
+    assert found == {(a, "sections/a.tex"), (b, "sections/deep/b.tex")}
+
+
+def test_propose_survives_a_stray_nonnumeric_file(tmp_path):
+    store = PendingDiffs(tmp_path / ".phd-helper")
+    d = store._dir("sections/s.tex")
+    d.mkdir(parents=True)
+    (d / "notes.json").write_text("{}", encoding="utf-8")
+
+    pid = store.propose("sections/s.tex",
+                        AnchoredPatch("x\n", "X\n", section_hash("x\n")),
+                        "X\n")
+
+    assert pid == "0000"
+
+
+def test_list_all_skips_a_torn_file(tmp_path):
+    store = PendingDiffs(tmp_path / ".phd-helper")
+    store.propose("sections/s.tex",
+                  AnchoredPatch("x\n", "X\n", section_hash("x\n")), "X\n")
+    (store._dir("sections/s.tex") / "0001.json").write_text(
+        '{"find": "x', encoding="utf-8")  # power loss mid-write
+
+    assert len(store.list_all()) == 1

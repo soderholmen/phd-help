@@ -2,9 +2,12 @@
 feeds client-side validation, and dispatch against a Project.
 """
 
+import json
+
 import pytest
 
 from phd_helper.bibtex import BibEntry
+from phd_helper.patches import section_hash
 from phd_helper.cascade import Lookup, ResolveResult, Response
 from phd_helper.chunking import Chunk
 from phd_helper.corpus import Corpus
@@ -441,3 +444,167 @@ def test_memory_write_replaces_the_memory_file(paper):
 
 def test_memory_write_is_offered_with_content_required():
     assert OFFERED["memory_write"] == {"content": "string"}
+
+
+# -- pending_decide (SPEC §3 approval window: voice resolves diffs) ---------
+
+
+def test_pending_decide_apply_lands_the_diff(paper):
+    diff = paper.propose_patch("sections/intro.tex", "It works well.",
+                               "It works.")
+
+    result = execute(call("pending_decide",
+                          {"diff_id": diff.id, "decision": "apply"}), paper)
+
+    assert result["status"] == "resolved"
+    r = result["resolutions"][0]
+    assert r["diff_id"] == diff.id and r["applied"] is True
+    assert r["section"] == "sections/intro.tex"
+    assert "It works.\n" in paper.read_section("sections/intro.tex")
+    assert paper.list_pending("sections/intro.tex") == []
+
+
+def test_pending_decide_discard_clears_without_writing(paper):
+    diff = paper.propose_patch("sections/intro.tex", "It works well.",
+                               "Nope.")
+
+    result = execute(call("pending_decide",
+                          {"diff_id": diff.id, "decision": "discard"}), paper)
+
+    r = result["resolutions"][0]
+    assert r["applied"] is False and r["reason"] == "discarded"
+    assert paper.read_section("sections/intro.tex") == INTRO
+    assert paper.list_pending("sections/intro.tex") == []
+
+
+def test_pending_decide_all_resolves_every_pending_diff(paper):
+    (paper.root / "sections" / "methods.tex").write_text(
+        "Methods body.\n", encoding="utf-8")
+    d1 = paper.propose_patch("sections/intro.tex", "It works well.",
+                             "It works.")
+    d2 = paper.propose_patch("sections/methods.tex", "Methods body.",
+                             "Methods text.")
+
+    result = execute(call("pending_decide",
+                          {"diff_id": "all", "decision": "apply"}), paper)
+
+    assert {r["diff_id"] for r in result["resolutions"]} == {d1.id, d2.id}
+    assert all(r["applied"] for r in result["resolutions"])
+    assert paper.pending.list_all() == []
+
+
+def test_pending_decide_apply_bounce_keeps_the_diff_pending(paper):
+    diff = paper.propose_patch("sections/intro.tex", "It works well.",
+                               "It works.")
+    paper.write_section("sections/intro.tex", "User rewrote the file.\n")
+
+    result = execute(call("pending_decide",
+                          {"diff_id": diff.id, "decision": "apply"}), paper)
+
+    r = result["resolutions"][0]
+    assert r["applied"] is False and r["reason"]
+    assert paper.list_pending("sections/intro.tex")  # still pending (§5)
+
+
+def test_pending_decide_unknown_id_bounces(paper):
+    result = execute(call("pending_decide",
+                          {"diff_id": "0042", "decision": "apply"}), paper)
+    assert "error" in result
+
+
+def test_pending_decide_rejects_an_unknown_decision(paper):
+    diff = paper.propose_patch("sections/intro.tex", "It works well.", "x")
+    result = execute(call("pending_decide",
+                          {"diff_id": diff.id, "decision": "maybe"}), paper)
+    assert "error" in result
+
+
+def test_pending_decide_validator_checks_id_and_decision(paper):
+    v = make_validators(paper)["pending_decide"]
+    assert v({"diff_id": "all", "decision": "apply"}) is None
+    diff = paper.propose_patch("sections/intro.tex", "It works well.", "x")
+    assert v({"diff_id": diff.id, "decision": "discard"}) is None
+    assert v({"diff_id": "0099", "decision": "apply"}) is not None
+    assert v({"diff_id": diff.id, "decision": "keep"}) is not None
+
+
+def test_pending_decide_is_offered_with_both_params():
+    assert OFFERED["pending_decide"] == {"diff_id": "string",
+                                         "decision": "string"}
+
+
+def test_pending_decide_all_stays_inside_the_session_window(paper):
+    # A diff from an earlier sitting is on disk but was never shown in
+    # this window — "apply all" must not write it without approval (§5).
+    (paper.root / "sections" / "methods.tex").write_text(
+        "Methods body.\n", encoding="utf-8")
+    seen = paper.propose_patch("sections/intro.tex", "It works well.",
+                               "It works.")
+    unseen = paper.propose_patch("sections/methods.tex", "Methods body.",
+                                 "Methods text.")
+
+    result = execute(call("pending_decide",
+                          {"diff_id": "all", "decision": "apply"}),
+                     paper, window={seen.id})
+
+    assert [r["diff_id"] for r in result["resolutions"]] == [seen.id]
+    assert paper.list_pending("sections/methods.tex")
+    assert "Methods text." not in \
+        paper.read_section("sections/methods.tex")
+    assert unseen.id not in {r["diff_id"] for r in result["resolutions"]}
+
+
+def test_pending_decide_window_excludes_foreign_ids(paper):
+    diff = paper.propose_patch("sections/intro.tex", "It works well.",
+                               "It works.")
+
+    result = execute(call("pending_decide",
+                          {"diff_id": diff.id, "decision": "apply"}),
+                     paper, window=set())
+
+    assert "error" in result
+    assert paper.list_pending("sections/intro.tex")
+
+
+def test_pending_decide_ambiguous_legacy_id_bounces(paper):
+    # Pre-global-ids, two sections could hold the same id; id-only
+    # addressing must refuse to guess, not apply both.
+    diff = paper.propose_patch("sections/intro.tex", "It works well.",
+                               "It works.")
+    (paper.root / "sections" / "methods.tex").write_text(
+        "Methods body.\n", encoding="utf-8")
+    # A pre-global-ids, pre-section-field file: same stem in another dir,
+    # section decoded from the dir name.
+    (paper.pending._dir("sections/methods.tex")).mkdir(parents=True,
+                                                       exist_ok=True)
+    (paper.pending._dir("sections/methods.tex") / f"{diff.id}.json").write_text(
+        json.dumps({"find": "Methods body.", "replace": "Methods text.",
+                    "base_hash": section_hash("Methods body.\n"),
+                    "proposed_text": "Methods text.\n",
+                    "bib_append": None}), encoding="utf-8")
+
+    result = execute(call("pending_decide",
+                          {"diff_id": diff.id, "decision": "discard"}),
+                     paper)
+
+    assert "error" in result and "ambiguous" in result["error"]
+    assert paper.list_pending("sections/intro.tex")
+    assert paper.list_pending("sections/methods.tex")
+    assert "It works." not in paper.read_section("sections/intro.tex")
+
+
+def test_pending_decide_apply_survives_a_deleted_section_file(paper):
+    (paper.root / "sections" / "methods.tex").write_text(
+        "Methods body.\n", encoding="utf-8")
+    d1 = paper.propose_patch("sections/methods.tex", "Methods body.",
+                             "Methods text.")
+    d2 = paper.propose_patch("sections/intro.tex", "It works well.",
+                             "It works.")
+    (paper.root / "sections" / "methods.tex").unlink()
+
+    result = execute(call("pending_decide",
+                          {"diff_id": "all", "decision": "apply"}), paper)
+
+    by = {r["diff_id"]: r for r in result["resolutions"]}
+    assert by[d1.id]["applied"] is False and by[d1.id]["reason"]
+    assert by[d2.id]["applied"] is True  # the pass continues past the loss

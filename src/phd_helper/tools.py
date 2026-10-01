@@ -9,6 +9,7 @@ sees them (the bounce), never the user.
 
 from phd_helper.bibtex import BibEntry, parse_bib, same_paper
 from phd_helper.cascade import Lookup, resolve_bibtex
+from phd_helper.patches import ApplyResult
 from phd_helper.project import Project, ProposeError
 from phd_helper.search import search_papers
 
@@ -117,6 +118,24 @@ TOOL_SCHEMAS = [
             "required": ["section", "find", "replace"],
             "additionalProperties": False}}},
     {"type": "function", "function": {
+        "name": "pending_decide",
+        "description": "Resolve a pending diff by the user's spoken "
+                       "decision, while the approval window is open: "
+                       "decision 'apply' for yes/apply/do it, 'discard' for "
+                       "no/discard/forget it. diff_id from the pending note; "
+                       "diff_id 'all' resolves every pending diff (apply "
+                       "all). Only call this while a diff is pending.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "diff_id": {"type": "string",
+                            "description": "The pending diff's id, or 'all' "
+                                           "for every pending diff"},
+                "decision": {"type": "string",
+                             "description": "'apply' or 'discard'"}},
+            "required": ["diff_id", "decision"],
+            "additionalProperties": False}}},
+    {"type": "function", "function": {
         "name": "memory_write",
         "description": "Replace the paper memory file: the persistent "
                        "decisions, claims, terminology and TODOs that "
@@ -153,13 +172,24 @@ def make_validators(project: Project) -> dict:
             return (f"find anchor not present in '{args['section']}' — "
                     "read the section and quote it exactly")
         return None
-    return {"section_write": find_exists, "cite_add": find_exists}
+
+    def decidable(args):
+        if args["decision"] not in ("apply", "discard"):
+            return "decision must be 'apply' or 'discard'"
+        if args["diff_id"] != "all" and not any(
+                d.id == args["diff_id"] for d in project.pending.list_all()):
+            return (f"no pending diff '{args['diff_id']}' — check the "
+                    "pending note")
+        return None
+    return {"section_write": find_exists, "cite_add": find_exists,
+            "pending_decide": decidable}
 
 
 async def execute_async(call, project: Project, resolve=resolve_bibtex,
                         search=search_papers, fetch=None, mailto: str = "",
                         openalex_mailto: str = "", corpus=None,
-                        store=None, autojoin=None) -> dict:
+                        store=None, autojoin=None,
+                        window: set[str] | None = None) -> dict:
     """Async dispatch: web_search and cite_add hit the network, the corpus
     tools hit the index; the rest is sync."""
     if call.name == "web_search":
@@ -195,7 +225,7 @@ async def execute_async(call, project: Project, resolve=resolve_bibtex,
     if call.name == "corpus_doc":
         return await _corpus_doc(call, project, corpus, store)
     if call.name != "cite_add":
-        return execute(call, project)
+        return execute(call, project, window=window)
     if fetch is None and resolve is resolve_bibtex:
         # The real cascade needs an HTTP fetcher; a mis-wired caller gets a
         # tool-error bounce, never a TypeError from inside the cascade.
@@ -222,8 +252,13 @@ async def execute_async(call, project: Project, resolve=resolve_bibtex,
                     "awaiting approval"}
 
 
-def execute(call, project: Project) -> dict:
-    """Run a validated call; return a JSON-serializable tool result."""
+def execute(call, project: Project, window: set[str] | None = None) -> dict:
+    """Run a validated call; return a JSON-serializable tool result.
+
+    ``window`` is the session's approval window (the diff ids the user has
+    actually been shown); ``None`` means no session restriction. Decisions
+    never reach past the window: applying a diff the user never saw would
+    bypass the §5 approval gate."""
     if call.name == "section_read":
         try:
             return {"content": project.read_section(call.args["section"])}
@@ -235,6 +270,48 @@ def execute(call, project: Project) -> dict:
         # approval gate — the §4 side panel is the user's edit surface.
         project.save_memory(call.args["content"])
         return {"status": "written", "chars": len(call.args["content"])}
+    if call.name == "pending_decide":
+        # §3 approval window: the agent interpreted the utterance against
+        # the pending approval; this lands that interpretation through the
+        # same apply/reject machinery the on-screen buttons use (§5).
+        a = call.args
+        if a["decision"] not in ("apply", "discard"):
+            return {"error": "decision must be 'apply' or 'discard'"}
+        pend = project.pending.list_all()
+        if window is not None:
+            pend = [d for d in pend if d.id in window]
+        if a["diff_id"] == "all":
+            targets = pend
+        else:
+            targets = [d for d in pend if d.id == a["diff_id"]]
+            if len(targets) > 1:
+                # Pre-global-ids, two sections could share an id; refuse
+                # to guess which one the user meant.
+                return {"error": f"diff id '{a['diff_id']}' is ambiguous — "
+                                 "several pending diffs share it"}
+        if not targets:
+            return {"error": "no pending diff with that id in the approval "
+                             "window — check the pending note"}
+        resolutions = []
+        for d in targets:
+            if a["decision"] == "apply":
+                try:
+                    r = project.apply_pending(d.section_path, d.id)
+                except OSError:
+                    # The section file vanished since the diff was
+                    # proposed: bounce this one, keep the pass going.
+                    r = ApplyResult(applied=False,
+                                    reason="the section file is gone")
+                resolutions.append(
+                    {"diff_id": d.id, "section": d.section_path,
+                     "applied": r.applied, "reason": r.reason,
+                     "text": r.text})
+            else:
+                project.reject_pending(d.section_path, d.id)
+                resolutions.append(
+                    {"diff_id": d.id, "section": d.section_path,
+                     "applied": False, "reason": "discarded", "text": None})
+        return {"status": "resolved", "resolutions": resolutions}
     if call.name == "section_write":
         try:
             diff = project.propose_patch(call.args["section"],
