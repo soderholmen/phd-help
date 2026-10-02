@@ -123,8 +123,13 @@ export function reducer(state: ShellState, event: ShellEvent): ShellState {
       return { ...state, armed: true };
     case "disarmed":
       return { ...state, armed: false };
+    case "audio_start":
+    case "audio_end":
     case "tts_stopped":
-      return state; // audio playback lands with the 3090 stack
+      // Playback is the PcmPlayer ref-singleton's business (App wires
+      // it to the socket router), never reducer state: audio must not
+      // re-render the shell, and non-holders never see these events.
+      return state;
     case "section_selected":
       return { ...state, selected: event.section };
     default:

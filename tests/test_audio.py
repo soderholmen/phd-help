@@ -299,6 +299,36 @@ async def test_moss_tts_close_is_best_effort():
     assert closed == ["/tts/session/close"]
 
 
+@pytest.mark.anyio
+async def test_moss_tts_surfaces_the_sample_rate_header():
+    # Voice-out schedules the browser's AudioBufferSourceNodes at the
+    # rate the sidecar actually produced (fast_api's X-Audio-Sample-Rate,
+    # TARGET_SR-configurable) — guessing 24 kHz would play chipmunks if
+    # the sidecar is ever relaunched at another rate.
+    def handler(request):
+        if request.url.path == "/tts/session/phd/audio":
+            return httpx.Response(200, content=b"zz",
+                                  headers={"X-Audio-Sample-Rate": "16000"})
+        return httpx.Response(200, json={})
+
+    tts = make_tts(handler)
+    assert tts.sample_rate == 24000          # before any stream: the default
+    [c async for c in tts.synthesize("hi")]
+    assert tts.sample_rate == 16000          # the sidecar's own truth
+
+
+@pytest.mark.anyio
+async def test_moss_tts_sample_rate_defaults_when_the_header_is_absent():
+    def handler(request):
+        if request.url.path == "/tts/session/phd/audio":
+            return httpx.Response(200, content=b"zz")
+        return httpx.Response(200, json={})
+
+    tts = make_tts(handler)
+    [c async for c in tts.synthesize("hi")]
+    assert tts.sample_rate == 24000
+
+
 # --- sidecar topology pin ---------------------------------------------------
 
 def test_sidecar_scripts_never_import_the_backend():

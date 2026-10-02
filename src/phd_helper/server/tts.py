@@ -7,9 +7,7 @@ pcm_s16le chunks. Every turn re-POSTs start with the same session_id —
 the server caches the prompt tokens, which is what makes turn 2 cheap.
 
 Failure policy (§8): TTS down means screen-only replies, so errors end
-the generator quietly; three consecutive failures flip faulted(). Audio
-out of the browser is deferred — run_turn consumes this stream but no
-player exists yet, and that is stated, not hidden.
+the generator quietly; three consecutive failures flip faulted().
 """
 
 import httpx
@@ -27,6 +25,10 @@ class MossTts:
         self._session_id = session_id
         self._failures = 0
         self._fault_threshold = fault_threshold
+        # The rate the sidecar actually produces (its TARGET_SR); the
+        # browser player schedules at this, so a relaunched sidecar at
+        # another rate never plays chipmunks. Updated when a stream opens.
+        self.sample_rate = 24000
 
     async def synthesize(self, text: str):
         if not text.strip():
@@ -43,6 +45,8 @@ class MossTts:
             async with self._http.stream(
                     "GET", f"/tts/session/{self._session_id}/audio") as resp:
                 resp.raise_for_status()
+                self.sample_rate = int(resp.headers.get(
+                    "X-Audio-Sample-Rate", 24000))
                 async for chunk in resp.aiter_bytes():
                     yield chunk
             self._failures = 0

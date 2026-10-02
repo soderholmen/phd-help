@@ -5,6 +5,9 @@ export class MicCapture {
   private ctx: AudioContext | null = null;
   rms = 0;
   onChunk: ((pcm: ArrayBuffer) => void) | null = null;
+  /** Per-chunk level (the worklet's 100 ms cadence) — the barge-in
+   *  gate's clock, distinct from the 2 s heartbeat meter. */
+  onLevel: ((rms: number) => void) | null = null;
 
   /** Lazy one-time setup (needs the user gesture), then resume. The
    *  context is only kept if the whole setup succeeds — a denied mic
@@ -26,6 +29,7 @@ export class MicCapture {
           let sum = 0;
           for (let i = 0; i < view.length; i += 8) sum += view[i] * view[i];
           this.rms = Math.sqrt(sum / (view.length / 8)) / 0x7fff; // meter feed
+          this.onLevel?.(this.rms); // barge-in gate feed
         };
         src.connect(node);
       } catch (e) {

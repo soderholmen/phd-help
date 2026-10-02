@@ -249,6 +249,22 @@ describe("anchor", () => {
   });
 });
 
+describe("audio bookends", () => {
+  it("fold to no-ops — playback is the player's, not state", () => {
+    const s = fold(
+      { type: "turn_started" },
+      { type: "audio_start", sample_rate: 24000 },
+      { type: "audio_end" },
+      { type: "tts_stopped" },
+    );
+    // turnActive cleared on assistant_text, never on audio events
+    // (audio_end never reaches non-holders; clearing here would wedge
+    // "thinking…" for them).
+    expect(s.turnActive).toBe(true);
+    expect(s.messages).toHaveLength(0);
+  });
+});
+
 it("an unknown event never wedges the shell", () => {
   const s = reducer(initialState, { type: "from_the_future" } as never);
   expect(s).toBe(initialState);

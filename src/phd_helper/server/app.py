@@ -63,6 +63,10 @@ class Session:
         self.state = app_state
         self.sockets: dict[str, WebSocket] = {}
         self.turn_task: asyncio.Task | None = None
+        # Voice-out (§3): True while the endpoint holder is being fed
+        # TTS chunks. A barge_in landing then is the client's playhead
+        # problem (pause/resume), not a server cancel.
+        self.speaking = False
         # §1: clicking a tree node anchors the section-scoped discussion;
         # the anchored section's body then rides every turn's context (§4).
         # Sitting-level, not per-tab: one conversation, one anchor (the
@@ -266,10 +270,7 @@ class Session:
                 if not valid_calls:
                     self.log({"role": "assistant", "content": text or ""})
                     await self.send({"type": "assistant_text", "text": text})
-                    # TTS seam: sentence-by-sentence synthesis lands with
-                    # the 3090 stack; the stub counts the request.
-                    async for _chunk in self.state.tts.synthesize(text):
-                        pass  # binary audio frames go out here
+                    await self._deliver_audio(text or "")
                     return
                 self.log(msg)  # assistant turn with tool_calls
                 for vc in valid_calls:
@@ -331,6 +332,63 @@ class Session:
             # fire-and-forget turn task — the client always hears back.
             await self.send({"type": "error", "where": "turn",
                              "message": f"unexpected error: {e}"})
+
+    async def _deliver_audio(self, text: str) -> None:
+        """Voice-out (§3): the sitting speaks to the endpoint holder.
+        Audio follows the mic — no holder means no synthesis (screen-
+        only, the §8 TTS-down shape). The bookends are holder-only too:
+        audio_start{sample_rate} opens, audio_end closes, and the PCM16
+        rides as binary between them. A mid-stream detach or handoff
+        drops the remainder: the text is on every screen, the audio is
+        ephemeral (the sendAudio-blip precedent). A cancel landing here
+        is a barge-in whose final opened the next turn: the text is
+        already logged and shown, so this turn ends quietly — no second
+        [interrupted], no turn_interrupted; the new turn_started clears
+        the client's buffer."""
+        holder = self.state.endpoint.endpoint(time.monotonic())
+        ws = self.sockets.get(holder) if holder else None
+        if ws is None:
+            return
+        started = False
+        self.speaking = True
+        try:
+            async for chunk in self.state.tts.synthesize(text):
+                if self.sockets.get(holder) is not ws or \
+                        self.state.endpoint.endpoint(
+                            time.monotonic()) != holder:
+                    # detached, or the lease moved on: audio follows the
+                    # mic, so the rest is dropped — but the episode is
+                    # closed anyway, because audio_end means "no more is
+                    # coming", not "you heard it all" (a silent tab with
+                    # an open episode would leave the barge gate live)
+                    await self._end_audio(ws, started)
+                    return
+                if not started:
+                    started = True
+                    await ws.send_text(json.dumps({
+                        "type": "audio_start",
+                        "sample_rate": self.state.tts.sample_rate}))
+                await ws.send_bytes(chunk)
+            await self._end_audio(ws, started)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            # A holder socket that died mid-send is a detach, not a turn
+            # fault: prune it and let the reply live on screen (the §8
+            # error must not fan out to every other tab because one
+            # tab's audio pipe burst). A synthesize fault lands here
+            # too — screen-only per §8, and a pruned-but-live socket
+            # re-attaches on its next heartbeat.
+            self.sockets.pop(holder, None)
+        finally:
+            self.speaking = False
+
+    async def _end_audio(self, ws: WebSocket, started: bool) -> None:
+        if started:
+            try:
+                await ws.send_text(json.dumps({"type": "audio_end"}))
+            except Exception:
+                pass  # the socket died; the next turn_started clears it
 
     def cancel_turn(self):
         if self.turn_task is not None and not self.turn_task.done():
@@ -1011,10 +1069,19 @@ def create_app(state: "AppState | None" = None,
                 sitting.turn_task = asyncio.create_task(
                     sitting.run_turn(text))
         elif kind == "barge_in":
-            # Qualifying interrupt: stop TTS now, abort thinking (§3).
-            # Fan-out: every tab's playback stops with the sitting's turn.
-            sitting.cancel_turn()
-            await sitting.send({"type": "tts_stopped"})
+            # §3: a qualifying interrupt. While the sitting is speaking,
+            # the client owns the playhead: it paused locally, the
+            # stream keeps flowing into its buffer, and its resume
+            # window decides whether playback continues — so the server
+            # says nothing. Only a thinking turn is aborted server-side
+            # (fan-out: every tab's playback stops with the turn); a
+            # finished turn has nothing to stop, and the client's window
+            # governs the draining buffer.
+            if not sitting.speaking:
+                if (sitting.turn_task is not None
+                        and not sitting.turn_task.done()):
+                    sitting.cancel_turn()
+                    await sitting.send({"type": "tts_stopped"})
         elif kind == "select_section":
             # §1: clicking a tree node anchors the section-scoped
             # discussion; the body then rides every later turn (§4).

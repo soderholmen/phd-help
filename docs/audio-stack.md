@@ -16,9 +16,8 @@ in `server/voice.py`:
   Python, fully tested). `UtteranceGate` takes any `speech(frame)->bool`,
   so a sidecar-hosted silero can replace `EnergyVad` without touching the
   state machine.
-- **No live partials and no browser audio-out yet.** NeMo 3.0 dropped the
-  stateful per-chunk streaming API the nemotron partials needed, and no
-  player exists for the TTS stream the backend already consumes.
+- **No live partials yet.** NeMo 3.0 dropped the stateful per-chunk
+  streaming API the nemotron partials needed.
 
 ## One-time setup
 
@@ -74,7 +73,44 @@ worked.
 | MOSS-TTS TTFB | ~13 s warm (test-stack accepted; SPEC's 180 ms is not met) |
 | MOSS-TTS turn 2 | ~30 s TTFB (suspected per-shape torch.compile recompiles) |
 
+## Voice-out (shipped)
+
+The endpoint holder hears replies: `run_turn` streams the MOSS PCM16 to
+the holder's socket between `audio_start{sample_rate}` and `audio_end`
+(view-only tabs get text only — audio follows the mic), and the shell's
+`PcmPlayer` plays it through a jitter-buffered scheduling queue
+(`web/app/src/voice/`). Barge-in: 200 ms of sustained AEC'd mic while
+playing pauses the playhead instantly; if the utterance yields no final
+transcript within 2.5 s, playback resumes where it stopped (SPEC §3).
+No holder armed ⇒ no synthesis at all (screen-only, the §8 TTS-down
+shape). Disarming stops playback.
+
+Honest deviations, stated not hidden:
+
+- **13 s TTFB bends "stops immediately."** A barge-in stops what has
+  been buffered; the unbuffered remainder of a still-synthesizing reply
+  is stranded when a final supersedes the turn. The text was already on
+  screen, so nothing is lost that §3 promised audibly.
+- **The gate is energy, not a VAD** (the endpointing deviation again).
+  A false trip is recoverable by the resume window.
+- **Resume is playhead-only.** A barge-in during the thinking phase has
+  no audio to resume — that turn is cancelled as before.
+- **Mid-stream holder handoff drops the remaining audio** (the text is
+  on every screen; the audio is ephemeral, the sendAudio-blip
+  precedent). `audio_end` still closes the episode — it means "no more
+  is coming", not "you heard it all".
+- **Jitter is fixed at 275 ms** (SPEC's 250-300 ms band, one knob in
+  `playback.ts`).
+- **SPEC's phone barge-in mitigations stay on the phone** (SPEC:97):
+  AEC warmup preroll and word-count gating are mobile-slice work; on
+  desktop the browser AEC is already on and the resume window recovers
+  from a false trip.
+- **No persistent-underrun tray notice** (SPEC:226): underrun behaves
+  as the spec's clean pause; the >5 s "degraded connection" notice is
+  deferred — the sidecar streams faster than realtime, so mid-stream
+  starvation is a cellular-shape problem.
+
 ## Deferred (seams intact)
 
-Browser PCM16 player + binary-out + barge-in; silero-in-sidecar WS
-endpointing; live partials; sentence-level TTS off the token stream.
+silero-in-sidecar WS endpointing; live partials; sentence-level TTS off
+the token stream.

@@ -9,8 +9,9 @@ The stubs keep the same shape so tests and the PHD_AUDIO_STACK=off path
 need no sidecars at all.
 
 Deferred, seam intact: live partials (NeMo 3.0 has no stateful per-chunk
-streaming API) and browser audio-out (server-side synthesis is consumed
-but not yet played; barge-in rides the same gap).
+streaming API). Browser audio-out shipped: run_turn streams the chunks
+plus an audio_start{sample_rate}/audio_end bookend to the endpoint
+holder's socket, and the shell's PcmPlayer plays and barges in.
 """
 
 import json
@@ -29,6 +30,10 @@ class SttProvider(Protocol):
 
 
 class TtsProvider(Protocol):
+    sample_rate: int
+    """PCM16 rate the chunks are at; audio_start carries it to the
+    player. A provider may update it when a stream opens."""
+
     async def synthesize(self, text: str) -> AsyncIterator[bytes]:
         """Yield audio chunks for one sentence (180 ms TTFB target)."""
 
@@ -51,6 +56,8 @@ class StubStt:
 
 
 class StubTts:
+    sample_rate = 24000
+
     def __init__(self):
         self.requests = 0
 

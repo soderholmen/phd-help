@@ -25,6 +25,8 @@ export type ServerEvent =
   | { type: "pong"; rms: number }
   | { type: "armed"; ok: boolean; holder: string | null }
   | { type: "disarmed" }
+  | { type: "audio_start"; sample_rate: number }
+  | { type: "audio_end" }
   | { type: "tts_stopped" }
   | { type: "section_selected"; section: string | null }
   | { type: "recap"; text: string }

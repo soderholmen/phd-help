@@ -5,6 +5,7 @@ live vLLM (§2); this file covers what only the app owns.
 
 import asyncio
 import json
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -122,7 +123,7 @@ def make_env(tmp_path, store=None, budget=8000):
                             fetch=None, corpus=corpus, corpus_store=store,
                             crossref_mailto="", openalex_mailto="",
                             ingest_tasks=set(), gist_task=None,
-                            sitting=None)
+                            sitting=None, endpoint=VoiceEndpoint())
     return state, Session(state)
 
 
@@ -304,6 +305,234 @@ def test_ws_binary_frames_drive_a_turn(tmp_path):
     joined = "\n".join(str(m.get("content") or "")
                        for m in state.llm.calls[0])
     assert "tighten the intro" in joined
+
+
+# -- voice-out: holder-gated audio delivery (SPEC §3) ----------------------
+# The sitting speaks to the endpoint holder only (audio follows the
+# mic); the wire is audio_start{sample_rate} → PCM16 binary → audio_end.
+# While the sitting is speaking, barge-in is the client's playhead
+# problem: the server keeps the stream flowing and says nothing.
+
+
+class ChunkyTts:
+    """Streams known bytes with a controllable pause between chunks.
+    The pause is what makes "while speaking" observable from the test
+    thread: audio_start proves the server is inside the pause."""
+
+    sample_rate = 24000
+
+    def __init__(self, chunks=(b"AB" * 4, b"CD" * 4), pause=0.0):
+        self.chunks = chunks
+        self.pause = pause
+        self.requests = 0
+
+    async def synthesize(self, text):
+        self.requests += 1
+        for i, c in enumerate(self.chunks):
+            if i and self.pause:
+                await asyncio.sleep(self.pause)
+            yield c
+
+    def faulted(self):
+        return False
+
+
+class SlowLlm(RecordingLlm):
+    """Holds the turn in the thinking phase so a barge_in lands there."""
+
+    async def chat(self, messages, **kwargs):
+        await asyncio.sleep(0.5)
+        return await super().chat(messages, **kwargs)
+
+
+def drain(ws, until):
+    """Frames in arrival order — ("ev", event) for JSON, ("bin", bytes)
+    for binary — until the named event arrives (inclusive)."""
+    frames = []
+    while True:
+        frame = ws.receive()
+        if frame.get("text") is not None:
+            ev = json.loads(frame["text"])
+            frames.append(("ev", ev))
+            if ev["type"] == until:
+                return frames
+        elif frame.get("bytes") is not None:
+            frames.append(("bin", frame["bytes"]))
+
+
+def test_the_holder_hears_the_reply_start_binary_end(tmp_path):
+    state = ws_state(tmp_path, tts=ChunkyTts())
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "arm"})
+            assert ws.receive_json()["type"] == "armed"
+            ws.send_json({"type": "typed", "text": "hello"})
+            frames = drain(ws, "audio_end")
+    types = [p["type"] for k, p in frames if k == "ev"]
+    assert types == ["turn_started", "assistant_text", "audio_start",
+                     "audio_end"]
+    start = next(p for k, p in frames if k == "ev"
+                 and p["type"] == "audio_start")
+    assert start["sample_rate"] == 24000
+    assert [p for k, p in frames if k == "bin"] == [b"AB" * 4, b"CD" * 4]
+
+
+def test_view_only_tabs_get_the_text_but_never_the_audio(tmp_path):
+    state = ws_state(tmp_path, tts=ChunkyTts())
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as holder:
+            with client.websocket_connect("/ws/voice?client=c2") as viewer:
+                assert holder.receive_json()["type"] == "hello"
+                assert viewer.receive_json()["type"] == "hello"
+                holder.send_json({"type": "arm"})
+                assert holder.receive_json()["type"] == "armed"
+                viewer.send_json({"type": "typed", "text": "hello"})
+                # The holder's audio_end proves the turn is fully done;
+                # the viewer's own ack proves its queue is drained —
+                # audio frames would have been queued ahead of it.
+                drain(holder, "audio_end")
+                viewer.send_json({"type": "select_section",
+                                  "section": "sections/intro.tex"})
+                frames = drain(viewer, "section_selected")
+    assert [p for k, p in frames if k == "bin"] == []
+    types = [p["type"] for k, p in frames if k == "ev"]
+    assert "assistant_text" in types  # text is everywhere (§7)
+    assert "audio_start" not in types and "audio_end" not in types
+
+
+def test_no_holder_means_no_synthesis(tmp_path):
+    # Audio follows the mic: nobody armed, nobody hears it — the reply
+    # stays on screen (the §8 TTS-down shape), and the sidecar is never
+    # paid for audio no one will play.
+    tts = ChunkyTts()
+    state = ws_state(tmp_path, tts=tts)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "typed", "text": "hello"})
+            frames = drain(ws, "assistant_text")
+    assert tts.requests == 0
+    types = [p["type"] for k, p in frames if k == "ev"]
+    assert "audio_start" not in types
+
+
+def test_barge_in_while_speaking_leaves_the_stream_flowing(tmp_path):
+    # The client owns the playhead while the sitting speaks: the server
+    # neither cancels the turn nor declares tts_stopped — the stream
+    # keeps flowing into the client's buffer, and its resume window
+    # decides whether playback continues.
+    tts = ChunkyTts(pause=0.5)
+    state = ws_state(tmp_path, tts=tts)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "arm"})
+            assert ws.receive_json()["type"] == "armed"
+            ws.send_json({"type": "typed", "text": "hello"})
+            # audio_start proves the server is mid-pause inside the
+            # synthesize loop: a barge_in landing there is while speaking
+            frames = drain(ws, "audio_start")
+            ws.send_json({"type": "barge_in"})
+            frames += drain(ws, "audio_end")
+    types = [p["type"] for k, p in frames if k == "ev"]
+    assert "tts_stopped" not in types
+    assert "turn_interrupted" not in types
+    assert [p for k, p in frames if k == "bin"] == [b"AB" * 4, b"CD" * 4]
+
+
+def test_barge_in_while_thinking_still_cancels(tmp_path):
+    # The defensive branch: the client's gate only fires while audio
+    # plays, but a barge_in during the thinking phase must still abort
+    # the turn (§3: stop now).
+    state = ws_state(tmp_path, llm=SlowLlm())
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "typed", "text": "hello"})
+            frames = drain(ws, "turn_started")
+            ws.send_json({"type": "barge_in"})
+            seen, got = {"tts_stopped", "turn_interrupted"}, []
+            while seen:  # the two sends race; order is not the contract
+                ev = ws.receive_json()
+                got.append(ev["type"])
+                seen.discard(ev["type"])
+    assert set(got) == {"tts_stopped", "turn_interrupted"}
+
+
+def test_holder_handoff_mid_stream_drops_the_rest(tmp_path):
+    # Audio follows the mic: when the lease moves on, the ex-holder's
+    # stream stops where it stood and the rest is text-only. audio_end
+    # still arrives — it means "no more is coming", and a client left
+    # with an open episode would keep its barge gate live on silence.
+    tts = ChunkyTts(pause=0.5)
+    state = ws_state(tmp_path, tts=tts)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "arm"})
+            assert ws.receive_json()["type"] == "armed"
+            ws.send_json({"type": "typed", "text": "hello"})
+            frames = drain(ws, "audio_start")
+            state.endpoint._holder = "c2"  # the lease moved mid-stream
+            time.sleep(0.7)  # chunk 2 would have arrived: dropped instead
+            frames += drain(ws, "audio_end")
+    assert [p for k, p in frames if k == "bin"] == [b"AB" * 4]
+    types = [p["type"] for k, p in frames if k == "ev"]
+    assert types[-2:] == ["audio_start", "audio_end"]
+
+
+class BoomSocket:
+    """A holder socket that dies exactly at a send."""
+
+    async def send_text(self, text):
+        raise RuntimeError("socket is dead")
+
+    async def send_bytes(self, data):
+        raise RuntimeError("socket is dead")
+
+
+@pytest.mark.anyio
+async def test_a_dying_holder_socket_is_a_detach_not_a_turn_fault(tmp_path):
+    # The §8 error envelope must not fan an audio-send failure out to
+    # every tab: one tab's audio pipe bursting is a detach, the reply
+    # is already on screen, and the dead socket is pruned the way
+    # Session.send prunes it.
+    state, session = make_env(tmp_path)
+    state.tts = ChunkyTts()
+    session.state.endpoint.arm("c1", time.monotonic())
+    events = []
+
+    async def capture(event):
+        events.append(event)
+
+    session.send = capture
+    session.attach("c1", BoomSocket())
+    await session.run_turn("hello")
+    assert not [e for e in events if e.get("type") == "error"]
+    assert "c1" not in session.sockets  # pruned, keep talking to the rest
+
+
+def test_a_final_during_audio_ends_the_spoken_turn_quietly(tmp_path):
+    # Supersede (§3/§8): the barge-in's transcript opens a new turn,
+    # which cancels the speaking one. The text was already logged and
+    # shown, so the cancelled turn ends quietly — no second
+    # [interrupted] in the history, no turn_interrupted on the wire.
+    tts = ChunkyTts(pause=0.5)
+    state = ws_state(tmp_path, tts=tts)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "arm"})
+            assert ws.receive_json()["type"] == "armed"
+            ws.send_json({"type": "typed", "text": "first"})
+            drain(ws, "audio_start")
+            ws.send_json({"type": "typed", "text": "second"})
+            frames = drain(ws, "audio_end")  # the second turn's
+    types = [p["type"] for k, p in frames if k == "ev"]
+    assert "turn_interrupted" not in types
+    assert tts.requests == 2
+    assert "[interrupted]" not in json.dumps(state.project.chat_tail())
 
 
 # -- /health store probe (SPEC §8, issue #22) -------------------------------
@@ -627,13 +856,17 @@ async def test_distill_skips_empty_sittings_and_llm_faults(tmp_path):
     assert state2.project.load_memory() == ""  # fault: skip, no raise
 
 
-def ws_state(tmp_path):
+def ws_state(tmp_path, tts=None, llm=None):
     """make_env's state plus what only the WS door reaches for."""
     state, _ = make_env(tmp_path)
     state.endpoint = VoiceEndpoint(ping_interval=2.0, lease_timeout=60.0)
     state.stt = StubStt()
     state.http = FakeHttp()
     state.ingestor = None
+    if tts is not None:
+        state.tts = tts
+    if llm is not None:
+        state.llm = llm
     return state
 
 

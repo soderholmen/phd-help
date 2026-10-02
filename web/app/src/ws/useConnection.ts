@@ -5,7 +5,8 @@
 // reconnect resumes it (hello re-sends the anchor, cards ride disk truth).
 import { useEffect, useRef } from "react";
 import { heartbeat } from "../protocol/frames";
-import type { ControlFrame, ServerEvent, ShellEvent } from "../types";
+import { routeIncoming, type Sink } from "./route";
+import type { ControlFrame, ShellEvent } from "../types";
 
 export interface Connection {
   send: (frame: ControlFrame) => void;
@@ -24,12 +25,15 @@ function clientId(): string {
 export function useConnection(
   dispatch: (event: ShellEvent) => void,
   getRms: () => number,
+  player: Sink["player"],
 ): Connection {
   const wsRef = useRef<WebSocket | null>(null);
   const dispatchRef = useRef(dispatch);
   dispatchRef.current = dispatch;
   const rmsRef = useRef(getRms);
   rmsRef.current = getRms;
+  const playerRef = useRef(player);
+  playerRef.current = player;
 
   useEffect(() => {
     let ws: WebSocket;
@@ -50,9 +54,12 @@ export function useConnection(
         if (!closedByUs) retryTimer = window.setTimeout(connect, 2000);
       };
       ws.onmessage = (ev) => {
-        if (typeof ev.data === "string") {
-          dispatchRef.current(JSON.parse(ev.data) as ServerEvent);
-        }
+        // Binary is TTS audio for the player; JSON is the reducer's —
+        // the split is routeIncoming's contract, tested without a socket.
+        routeIncoming(ev.data as string | ArrayBuffer, {
+          dispatch: (e) => dispatchRef.current(e),
+          player: playerRef.current,
+        });
       };
     };
     connect();

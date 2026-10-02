@@ -3,9 +3,11 @@
 // the reducer; this file only wires doors to it.
 import { useEffect, useReducer, useRef, useState } from "react";
 import { reducer, initialState } from "./protocol/reducer";
-import { approve, arm, disarm, reject, selectSection, typed } from "./protocol/frames";
+import { approve, arm, bargeIn, disarm, reject, selectSection, typed } from "./protocol/frames";
 import { useConnection } from "./ws/useConnection";
 import { MicCapture } from "./voice/capture";
+import { PcmPlayer } from "./voice/playback";
+import { BARGE_CHUNKS, BARGE_RMS, BargeGate, RESUME_WINDOW_MS } from "./voice/barge";
 import { fetchHealth, fetchTree } from "./api/sections";
 import { listDocs, pin, retry, unpin, uploadPdf, type UploadMeta } from "./api/corpus";
 import type { CorpusDoc, Health, SectionNode } from "./types";
@@ -21,7 +23,39 @@ export default function App() {
   const micRef = useRef<MicCapture | null>(null);
   if (micRef.current === null) micRef.current = new MicCapture();
   const mic = micRef.current;
-  const conn = useConnection(dispatch, () => mic.rms);
+  // Voice-out (§3): the player is a ref-singleton like the mic — audio
+  // must never re-render the shell. The AudioContext starts suspended
+  // (autoplay policy); the arm gesture unlocks it, and audio only ever
+  // flows to an armed holder anyway.
+  const playerRef = useRef<PcmPlayer | null>(null);
+  if (playerRef.current === null) playerRef.current = new PcmPlayer(new AudioContext());
+  const player = playerRef.current;
+  const conn = useConnection(dispatch, () => mic.rms, player);
+  const connRef = useRef(conn);
+  connRef.current = conn;
+  // Barge-in (§3): sustained AEC'd mic while playing → pause the
+  // playhead, tell the server (it only acts on a thinking turn), and
+  // arm the resume window. A final transcript opens a new turn whose
+  // turn_started stops the player — which also makes a pending resume
+  // inert (stop() clears the pause), so the window needs no cancel.
+  const resumeTimer = useRef<number | undefined>(undefined);
+  const gateRef = useRef<BargeGate | null>(null);
+  if (gateRef.current === null) {
+    gateRef.current = new BargeGate({
+      threshold: BARGE_RMS,
+      chunks: BARGE_CHUNKS,
+      speaking: () => playerRef.current!.isSpeaking,
+      onFire: () => {
+        playerRef.current!.pause();
+        connRef.current.send(bargeIn());
+        window.clearTimeout(resumeTimer.current);
+        resumeTimer.current = window.setTimeout(
+          () => playerRef.current!.resume(),
+          RESUME_WINDOW_MS,
+        );
+      },
+    });
+  }
 
   const [tree, setTree] = useState<SectionNode[]>([]);
   const [docs, setDocs] = useState<CorpusDoc[]>([]);
@@ -66,10 +100,13 @@ export default function App() {
   }, [mic, state.armed]);
 
   // PCM rides the socket only while armed (arming is explicit, §3).
+  // The level feed is unconditional: the gate itself is closed unless
+  // audio is playing, and capture only runs while armed anyway.
   useEffect(() => {
     mic.onChunk = (pcm) => {
       if (state.armed) conn.sendAudio(pcm);
     };
+    mic.onLevel = (rms) => gateRef.current!.level(rms);
   }, [mic, conn, state.armed]);
 
   const toggleVoice = async () => {
@@ -79,9 +116,11 @@ export default function App() {
       } catch {
         return;
       }
+      player.unlock(); // same gesture: the reply's AudioContext autoplay
       conn.send(arm());
     } else {
       mic.suspend();
+      player.stop(); // the off switch means silence, mid-reply included
       conn.send(disarm());
     }
   };
