@@ -92,6 +92,7 @@ export function reducer(state: ShellState, event: ShellEvent): ShellState {
         section: event.section,
         find: event.find,
         replace: event.replace,
+        ...(event.created ? { created: event.created } : {}),
       };
       // A reconnect re-presents the sitting's pending diffs (§7 reopen);
       // a card already on screen must not double.

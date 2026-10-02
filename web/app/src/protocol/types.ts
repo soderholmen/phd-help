@@ -12,6 +12,9 @@ export interface DiffCard {
   section: string;
   find: string;
   replace: string;
+  // section_create (#28): the new file the approval lands alongside the
+  // wiring patch.
+  created?: { path: string; content: string };
 }
 
 export interface ShellState {

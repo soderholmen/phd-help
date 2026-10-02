@@ -1579,3 +1579,227 @@ def test_project_activate_rejects_traversal_and_strangers(tmp_path):
         assert client.post("/projects/activate",
                            json={"name": "nope"}).status_code == 404
     assert state.project.root.name == "my-paper"  # unchanged
+
+
+# -- section_create card + file doors + project doors (issue #28) ---------
+
+CREATE = {"section": "sections/related.tex",
+          "content": "\\section{Related Work}\nPrior work.\n",
+          "after": "sections/intro.tex"}
+
+
+def test_create_diff_card_carries_created_and_approves(tmp_path):
+    state = ws_state(tmp_path)
+    state.llm = ScriptLlm([tool_step("section_create", CREATE),
+                           text_step("Proposed the new part.")])
+    seed_gists(state)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            ws.receive_json()
+            ws.send_json({"type": "typed", "text": "add a related work part"})
+            while (card := ws.receive_json())["type"] != "diff":
+                pass
+            assert card["section"] == "main.tex"  # the wiring is the patch
+            assert card["created"] == {"path": "sections/related.tex",
+                                       "content": CREATE["content"]}
+            ws.send_json({"type": "approve", "section": card["section"],
+                          "diff_id": card["diff_id"]})
+            while (res := ws.receive_json())["type"] != "diff_resolved":
+                pass  # the turn's closing assistant_text may land first
+            assert res["applied"]
+    root = state.project.root
+    assert (root / "sections" / "related.tex").is_file()
+    assert ("\\input{sections/intro}\n\\input{sections/related}"
+            in (root / "main.tex").read_text(encoding="utf-8"))
+
+
+def test_pending_create_replays_with_created_on_reconnect(tmp_path):
+    # §7/§8 reopen: a create diff that outlives the tab comes back as a
+    # card with its file bytes, not just the wiring line.
+    state = ws_state(tmp_path)
+    state.llm = ScriptLlm([tool_step("section_create", CREATE),
+                           text_step("Proposed the new part.")])
+    seed_gists(state)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            ws.receive_json()
+            ws.send_json({"type": "typed", "text": "add a related work part"})
+            while ws.receive_json()["type"] != "diff":
+                pass
+        with client.websocket_connect("/ws/voice?client=c2") as ws2:
+            ws2.receive_json()  # hello
+            card = ws2.receive_json()
+            assert card["type"] == "diff"
+            assert card["created"]["path"] == "sections/related.tex"
+
+
+def test_file_upload_lands_wired_at_the_end(tmp_path):
+    state = ws_state(tmp_path)
+    with TestClient(create_app(state=state)) as client:
+        r = client.post("/project/files?name=method.tex",
+                        content=b"We measure things.\n")
+        assert r.status_code == 200
+        assert r.json() == {"path": "sections/method.tex"}
+        main = (state.project.root / "main.tex").read_text(encoding="utf-8")
+        assert "\\input{sections/method}\n\\end{document}" in main
+        linked = {f["path"]: f["linked"]
+                  for f in client.get("/project/files").json()["files"]}
+        assert linked["sections/method.tex"] is True
+
+
+def test_file_upload_guards(tmp_path):
+    state = ws_state(tmp_path)
+    with TestClient(create_app(state=state)) as client:
+        assert client.post("/project/files?name=../evil.tex",
+                           content=b"x").status_code == 400
+        assert client.post("/project/files?name=notes.txt",
+                           content=b"x").status_code == 400
+        assert client.post("/project/files?name=intro.tex",  # exists
+                           content=b"x").status_code == 409
+    assert not (state.project.root / "sections" / "intro.tex"
+                ).read_text(encoding="utf-8").startswith("x")
+
+
+def test_files_listing_marks_linked_and_skips_the_spine(tmp_path):
+    state = ws_state(tmp_path)
+    (state.project.root / "sections" / "orphan.tex").write_text(
+        "x\n", encoding="utf-8")
+    with TestClient(create_app(state=state)) as client:
+        files = client.get("/project/files").json()["files"]
+    by = {f["path"]: f["linked"] for f in files}
+    assert by["sections/intro.tex"] is True
+    assert by["sections/orphan.tex"] is False
+    assert "main.tex" not in by  # the spine is not a file-door target
+
+
+def test_file_remove_is_soft_and_restorable(tmp_path):
+    state = ws_state(tmp_path)
+    original = (state.project.root / "sections" / "intro.tex").read_text(
+        encoding="utf-8")
+    with TestClient(create_app(state=state)) as client:
+        assert client.post("/project/files/remove",
+                           json={"path": "sections/intro.tex"}
+                           ).status_code == 200
+        root = state.project.root
+        assert not (root / "sections" / "intro.tex").exists()
+        main = (root / "main.tex").read_text(encoding="utf-8")
+        assert "\\input{sections/intro}" not in main
+        listing = client.get("/project/files").json()
+        assert listing["trash"] == ["sections/intro.tex"]
+        assert client.post("/project/files/restore",
+                           json={"path": "sections/intro.tex"}
+                           ).status_code == 200
+    assert (root / "sections" / "intro.tex").read_text(
+        encoding="utf-8") == original
+    assert "\\input{sections/intro}" in (
+        root / "main.tex").read_text(encoding="utf-8")
+
+
+def test_file_remove_guards(tmp_path):
+    state = ws_state(tmp_path)
+    with TestClient(create_app(state=state)) as client:
+        assert client.post("/project/files/remove",
+                           json={"path": "main.tex"}).status_code == 400
+        # Case-insensitive filesystems (the deployment platform): "Main.tex"
+        # IS the spine — the guard compares casefolded, not by exact string.
+        assert client.post("/project/files/remove",
+                           json={"path": "Main.tex"}).status_code == 400
+        assert client.post("/project/files/remove",
+                           json={"path": "../x.tex"}).status_code == 400
+        assert client.post("/project/files/remove",
+                           json={"path": "sections/nope.tex"}
+                           ).status_code == 404
+    assert (state.project.root / "sections" / "intro.tex").exists()
+    assert (state.project.root / "main.tex").is_file()  # the spine stays put
+
+
+def test_projects_new_scaffolds_and_activates(tmp_path):
+    state = ws_state(tmp_path)
+    state.projects_root = tmp_path
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            ws.receive_json()
+            ws.send_json({"type": "typed", "text": "hi"})
+            while ws.receive_json()["type"] != "assistant_text":
+                pass
+        assert client.post("/projects/new", json={"name": "next-paper"}).json() \
+            == {"active": "next-paper"}
+    assert state.project.root.name == "next-paper"
+    assert state.sitting is None  # the switch ended the old sitting
+    new = tmp_path / "next-paper"
+    assert (new / "main.tex").is_file()
+    assert (new / "sections" / "intro.tex").is_file()
+    assert (new / "refs.bib").is_file()
+    assert Project(tmp_path / "my-paper").chat_divider()["reason"] == "switch"
+
+
+def test_projects_new_guards(tmp_path):
+    state = ws_state(tmp_path)
+    state.projects_root = tmp_path
+    with TestClient(create_app(state=state)) as client:
+        assert client.post("/projects/new",
+                           json={"name": "my-paper"}).status_code == 409
+        assert client.post("/projects/new",
+                           json={"name": "../escape"}).status_code == 400
+        assert client.post("/projects/new",
+                           json={"name": ""}).status_code == 400
+    assert state.project.root.name == "my-paper"  # unchanged
+
+
+def _zip(members: dict) -> bytes:
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, body in members.items():
+            z.writestr(name, body)
+    return buf.getvalue()
+
+
+def test_projects_import_zip_lands_and_activates(tmp_path):
+    state = ws_state(tmp_path)
+    state.projects_root = tmp_path
+    blob = _zip({"main.tex": "\\begin{document}\n\\input{sections/a}\n"
+                             "\\end{document}\n",
+                 "sections/a.tex": "\\section{A}\nA.\n",
+                 "refs.bib": ""})
+    with TestClient(create_app(state=state)) as client:
+        assert client.post("/projects/import?name=imported",
+                           content=blob).json() == {"active": "imported"}
+    assert state.project.root.name == "imported"
+    assert (tmp_path / "imported" / "sections" / "a.tex").is_file()
+
+
+def test_projects_import_accepts_one_top_level_folder(tmp_path):
+    state = ws_state(tmp_path)
+    state.projects_root = tmp_path
+    blob = _zip({"paper/main.tex": "\\begin{document}\n\\end{document}\n",
+                 "paper/sections/a.tex": "A.\n"})
+    with TestClient(create_app(state=state)) as client:
+        assert client.post("/projects/import?name=flat",
+                           content=blob).status_code == 200
+    assert (tmp_path / "flat" / "main.tex").is_file()
+    assert (tmp_path / "flat" / "sections" / "a.tex").is_file()
+
+
+def test_projects_import_guards(tmp_path):
+    state = ws_state(tmp_path)
+    state.projects_root = tmp_path
+    with TestClient(create_app(state=state)) as client:
+        assert client.post("/projects/import?name=slip", content=_zip(
+            {"main.tex": "\\end{document}\n", "../evil.tex": "x"}
+        )).status_code == 400
+        assert not (tmp_path / "evil.tex").exists()
+        assert client.post("/projects/import?name=exe", content=_zip(
+            {"main.tex": "\\end{document}\n", "tool.exe": "MZ"}
+        )).status_code == 400
+        assert client.post("/projects/import?name=nohead", content=_zip(
+            {"sections/a.tex": "A.\n"})).status_code == 400
+        assert client.post("/projects/import?name=my-paper", content=_zip(
+            {"main.tex": "\\end{document}\n"})).status_code == 409
+        assert client.post("/projects/import?name=../out", content=b"zip"
+                           ).status_code == 400
+        assert client.post("/projects/import?name=notazip",
+                           content=b"junk").status_code == 400
+    assert state.project.root.name == "my-paper"  # unchanged
+    assert not (tmp_path / "slip").exists()  # refused zips leave nothing

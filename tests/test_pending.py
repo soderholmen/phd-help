@@ -113,3 +113,38 @@ def test_list_all_skips_a_torn_file(tmp_path):
         '{"find": "x', encoding="utf-8")  # power loss mid-write
 
     assert len(store.list_all()) == 1
+
+
+# -- file creation riding the approval (section_create) ---------------------
+# The bib_append precedent generalized: a new file's bytes ride the same
+# pending JSON as the main.tex patch that wires it in — one approval, both
+# halves land together or neither does.
+
+
+def test_a_create_diff_round_trips_through_disk(tmp_path):
+    store = PendingDiffs(tmp_path / ".phd-helper")
+    main = "a\n\\end{document}\n"
+    patch = AnchoredPatch("\\end{document}",
+                          "\\input{sections/new}\n\\end{document}",
+                          section_hash(main))
+    store.propose("main.tex", patch,
+                  "a\n\\input{sections/new}\n\\end{document}\n",
+                  create=("sections/new.tex", "New part\n"))
+
+    d = PendingDiffs(tmp_path / ".phd-helper").list_pending("main.tex")[0]
+
+    assert d.create_path == "sections/new.tex"
+    assert d.create_content == "New part\n"
+
+
+def test_a_plain_patch_carries_no_create(tmp_path):
+    # Old pending files (and plain section_write diffs) have no create
+    # field at all — they must read as plain patches, not half-creates.
+    store = PendingDiffs(tmp_path / ".phd-helper")
+    store.propose("sections/s.tex",
+                  AnchoredPatch("x\n", "X\n", section_hash("x\n")), "X\n")
+
+    d = PendingDiffs(tmp_path / ".phd-helper").list_pending("sections/s.tex")[0]
+
+    assert d.create_path is None
+    assert d.create_content is None

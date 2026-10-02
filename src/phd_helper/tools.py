@@ -118,6 +118,28 @@ TOOL_SCHEMAS = [
             "required": ["section", "find", "replace"],
             "additionalProperties": False}}},
     {"type": "function", "function": {
+        "name": "section_create",
+        "description": "Propose a NEW section file: the file's content "
+                       "plus its \\input wiring into the root file become "
+                       "one pending diff the user approves. The section "
+                       "must not exist yet. Use after to place it right "
+                       "after an existing section; without after it joins "
+                       "the end of the document.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "section": {"type": "string",
+                            "description": "New file path, e.g. "
+                                           "sections/method.tex"},
+                "content": {"type": "string",
+                            "description": "The full file content, LaTeX"},
+                "after": {"type": "string",
+                          "description": "Existing section path to place "
+                                         "it after; empty string to join "
+                                         "the end of the document"}},
+            "required": ["section", "content", "after"],
+            "additionalProperties": False}}},
+    {"type": "function", "function": {
         "name": "pending_decide",
         "description": "Resolve a pending diff by the user's spoken "
                        "decision, while the approval window is open: "
@@ -173,6 +195,16 @@ def make_validators(project: Project) -> dict:
                     "read the section and quote it exactly")
         return None
 
+    def not_exists(args):
+        # The inverse of find_exists: a create targets a path that must
+        # NOT be on disk yet — the propose-side guards do the rest.
+        try:
+            project.read_section(args["section"])
+        except (OSError, KeyError):
+            return None
+        return (f"section '{args['section']}' already exists — patch it "
+                "with section_write instead of creating it")
+
     def decidable(args):
         if args["decision"] not in ("apply", "discard"):
             return "decision must be 'apply' or 'discard'"
@@ -182,7 +214,7 @@ def make_validators(project: Project) -> dict:
                     "pending note")
         return None
     return {"section_write": find_exists, "cite_add": find_exists,
-            "pending_decide": decidable}
+            "section_create": not_exists, "pending_decide": decidable}
 
 
 async def execute_async(call, project: Project, resolve=resolve_bibtex,
@@ -325,6 +357,23 @@ def execute(call, project: Project, window: set[str] | None = None) -> dict:
         return {"status": "pending", "diff_id": diff.id,
                 "section": diff.section_path,
                 "note": "diff shown to the user; awaiting approval"}
+    if call.name == "section_create":
+        try:
+            diff = project.propose_create(call.args["section"],
+                                          call.args["content"],
+                                          call.args.get("after") or None)
+        except ProposeError as e:
+            return {"error": str(e)}
+        except OSError:
+            return {"error": f"cannot read the root file for "
+                             f"section '{call.args['section']}'"}
+        return {"status": "pending", "diff_id": diff.id,
+                "section": diff.section_path,
+                "find": diff.patch.find, "replace": diff.patch.replace,
+                "created": {"path": diff.create_path,
+                            "content": diff.create_content},
+                "note": "new file + wiring shown to the user; awaiting "
+                        "approval"}
     return {"error": f"unknown tool '{call.name}'"}
 
 

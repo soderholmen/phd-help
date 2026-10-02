@@ -40,6 +40,24 @@ body { margin: 0; }
 .conn { font-size: 0.85rem; opacity: 0.8; }
 .conn.down { color: var(--bad); }
 .health { font-size: 0.8rem; opacity: 0.6; font-variant-numeric: tabular-nums; }
+.projects { margin-left: auto; display: flex; gap: 0.4rem; align-items: center; }
+.projects select {
+  padding: 0.35rem 0.5rem;
+  border-radius: 8px;
+  border: 1px solid #888;
+  background: transparent;
+  color: inherit;
+  max-width: 12rem;
+}
+.projects button {
+  padding: 0.35rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid #888;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
 
 .panels {
   display: grid;
@@ -53,7 +71,7 @@ body { margin: 0; }
 }
 
 .left, .right { overflow-y: auto; min-height: 0; }
-.left h2, .corpus h2 {
+.left h2, .corpus h2, .files h2 {
   margin: 0 0 0.5rem;
   font-size: 0.85rem;
   text-transform: uppercase;
@@ -144,6 +162,8 @@ body { margin: 0; }
   cursor: pointer;
 }
 .diff .acts button:first-child { border-color: var(--accent); color: var(--accent); }
+.diff .creates { font-size: 0.85rem; color: var(--accent); }
+.diff .creates-body { border-left: 3px solid var(--accent); }
 
 .composer { display: flex; gap: 0.5rem; }
 .composer input {
@@ -202,3 +222,22 @@ body { margin: 0; }
 }
 .corpus .err { color: var(--bad); font-size: 0.85em; }
 .corpus .empty { opacity: 0.6; }
+
+/* File doors (#28): the same shape as the corpus list, smaller stakes. */
+.files { display: grid; gap: 0.5rem; align-content: start; margin-top: 1.25rem; }
+.files ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.35rem; }
+.files .file { padding: 0.45rem 0.6rem; border-radius: 8px; background: var(--fill); display: flex; gap: 0.5rem; align-items: baseline; flex-wrap: wrap; }
+.files .ttl { font-weight: 600; font-size: 0.9rem; overflow-wrap: anywhere; }
+.files .meta { opacity: 0.6; font-size: 0.85em; overflow-wrap: anywhere; }
+.files .acts { margin-left: auto; display: flex; gap: 0.35rem; }
+.files .acts button {
+  padding: 0.15rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid #888;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.files .err { color: var(--bad); font-size: 0.85em; }
+.files .empty { opacity: 0.6; }

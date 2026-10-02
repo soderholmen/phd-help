@@ -7,7 +7,8 @@ persistence lives in ``.phd-helper/`` inside the project folder.
 """
 
 import json
-from pathlib import Path
+import re
+from pathlib import Path, PurePosixPath
 
 from phd_helper import sessionlog
 from phd_helper.bibtex import (BibEntry, dedupe_key, format_entry, make_key,
@@ -202,6 +203,59 @@ class Project:
                            proposed_text=trial.text, bib_append=bib_append,
                            cite_key=final_key)
 
+    def propose_create(self, path: str, content: str,
+                       after: str | None = None) -> PendingDiff:
+        """section_create: a new part + its wiring into the root file, one
+        approval. The patch is the ``\\input`` insertion; the new file's
+        bytes ride the diff the way a bib entry rides a cite diff — both
+        halves land together on apply, or neither does."""
+        p = PurePosixPath(path.replace("\\", "/"))
+        if (not path.endswith(".tex") or p.is_absolute()
+                or ".." in p.parts or path == self.root_file):
+            raise ProposeError(
+                f"cannot create {path!r}: must be a relative .tex path "
+                "inside the project")
+        if (self.root / p).exists():
+            raise ProposeError(f"file already exists: {path}")
+        problems = lint_latex(content, self._bib_keys())
+        if problems:
+            raise ProposeError("lint failed: " + "; ".join(
+                pr.message for pr in problems))
+        main = self.read_section(self.root_file)
+        stem = str(p)[: -len(".tex")]
+        if after is not None:
+            line = self._input_line_for(main, after)
+            if line is None:
+                raise ProposeError(
+                    f"no \\input line for '{after}' in {self.root_file}")
+            find, replace = line, f"{line}\n\\input{{{stem}}}"
+        else:
+            # default: the part joins the end of the document
+            find = "\\end{document}"
+            replace = f"\\input{{{stem}}}\n{find}"
+        patch = AnchoredPatch(find=find, replace=replace,
+                              base_hash=section_hash(main))
+        trial = apply_patch(main, patch)
+        if not trial.applied:
+            raise ProposeError(trial.reason)
+        diff_id = self.pending.propose(self.root_file, patch, trial.text,
+                                       create=(str(p), content))
+        return PendingDiff(id=diff_id, section_path=self.root_file,
+                           patch=patch, proposed_text=trial.text,
+                           create_path=str(p), create_content=content)
+
+    def _input_line_for(self, main: str, after: str) -> str | None:
+        """The exact \\input line in main that resolves to `after` — the
+        anchor for an insert-after, quoted from disk truth, not guessed."""
+        want = after if after.endswith(".tex") else f"{after}.tex"
+        for line in main.splitlines():
+            m = re.search(r"\\(?:input|include)\{([^}]*)\}", line)
+            if m:
+                arg = m.group(1)
+                if (arg if arg.endswith(".tex") else f"{arg}.tex") == want:
+                    return line
+        return None
+
     def list_pending(self, path: str) -> list[PendingDiff]:
         return self.pending.list_pending(path)
 
@@ -224,10 +278,25 @@ class Project:
                         reason=f"key '{held.key}' was taken by another paper "
                                "since this diff was proposed")
                 append = None  # identical entry already landed: skip append
+        if diff.create_path is not None:
+            # Propose-time guards go stale: a file that appeared since
+            # the proposal bounces the whole diff — bytes the user wrote
+            # by hand outrank the agent's proposal, wiring included.
+            if (self.root / diff.create_path).exists():
+                return ApplyResult(
+                    applied=False,
+                    reason=f"file already exists: {diff.create_path}")
         current = self.read_section(path)
         result = apply_patch(current, diff.patch)
         if not result.applied:
             return result  # ambiguous re-anchor: reason shown, stays pending
+        if diff.create_path is not None:
+            # The wiring trial passed: land the file first, then the
+            # line that pulls it in — a half-create without the wiring
+            # would be an invisible orphan.
+            target = self.root / diff.create_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(diff.create_content or "", encoding="utf-8")
         self.write_section(path, result.text)
         if append:
             # One approval covers all three (§6): the entry rides the diff.

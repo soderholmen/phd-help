@@ -67,6 +67,104 @@ def test_propose_lints_before_showing_diff(paper):
     assert paper.list_pending("sections/intro.tex") == []
 
 
+# -- section_create: one approval, two files (the bib_append pattern) -------
+
+
+def test_create_proposal_writes_nothing_until_approved(paper):
+    diff = paper.propose_create("sections/method.tex", "We measure things.\n")
+
+    assert diff.section_path == "main.tex"
+    assert diff.create_path == "sections/method.tex"
+    assert not (paper.root / "sections" / "method.tex").exists()
+    assert paper.read_section("main.tex") == MAIN  # wiring not landed
+    assert [d.id for d in paper.list_pending("main.tex")] == [diff.id]
+
+
+def test_approve_create_lands_both_files_with_one_approval(paper):
+    diff = paper.propose_create("sections/method.tex", "We measure things.\n")
+
+    result = paper.apply_pending("main.tex", diff.id)
+
+    assert result.applied
+    assert (paper.root / "sections" / "method.tex").read_text(
+        encoding="utf-8") == "We measure things.\n"
+    # default anchor: the part joins the document before \end{document}
+    assert ("\\input{sections/method}\n\\end{document}"
+            in paper.read_section("main.tex"))
+    assert paper.list_pending("main.tex") == []
+
+
+def test_create_after_lands_behind_the_named_part(paper):
+    diff = paper.propose_create("sections/method.tex", "M.\n",
+                                after="sections/intro.tex")
+    paper.apply_pending("main.tex", diff.id)
+
+    main = paper.read_section("main.tex")
+    assert ("\\input{sections/intro}\n\\input{sections/method}\n"
+            "\\input{sections/related}" in main)
+
+
+def test_create_lints_the_new_file_before_the_diff_shows(paper):
+    with pytest.raises(ProposeError, match="[Ll]int"):
+        paper.propose_create("sections/bad.tex", "broken \\textbf{brace")
+    assert paper.list_pending("main.tex") == []
+
+
+def test_create_refuses_an_existing_target(paper):
+    with pytest.raises(ProposeError, match="already exists"):
+        paper.propose_create("sections/intro.tex", "overwrite attempt\n")
+
+
+def test_create_refuses_traversal_and_the_root_file(paper):
+    with pytest.raises(ProposeError):
+        paper.propose_create("../evil.tex", "x\n")
+    with pytest.raises(ProposeError):
+        paper.propose_create("main.tex", "x\n")
+    with pytest.raises(ProposeError):
+        paper.propose_create("notes.txt", "x\n")  # .tex only
+
+
+def test_apply_bounces_when_the_file_appeared_since_propose(paper):
+    diff = paper.propose_create("sections/method.tex", "M.\n")
+    (paper.root / "sections" / "method.tex").write_text(
+        "hand-written in the meantime\n", encoding="utf-8")
+
+    result = paper.apply_pending("main.tex", diff.id)
+
+    assert not result.applied
+    assert "exists" in result.reason
+    assert paper.read_section("main.tex") == MAIN  # wiring untouched too
+    assert (paper.root / "sections" / "method.tex").read_text(
+        encoding="utf-8") == "hand-written in the meantime\n"
+
+
+def test_apply_of_a_clobbered_wiring_leaves_the_new_file_unwritten(paper):
+    diff = paper.propose_create("sections/method.tex", "M.\n")
+    # the user restructured main.tex so the wiring anchor is gone
+    (paper.root / "main.tex").write_text(
+        "\\documentclass{article}\n\\begin{document}\n"
+        "\\input{sections/intro}\n\\end\n", encoding="utf-8")
+
+    result = paper.apply_pending("main.tex", diff.id)
+
+    assert not result.applied
+    assert not (paper.root / "sections" / "method.tex").exists()
+
+
+def test_undo_of_a_create_unwires_but_keeps_the_file(paper):
+    # Documented shape: undo rides the main.tex patch — the \input line
+    # goes, the file stays (invisible to the tree, removable via the
+    # file doors). Undo never deletes bytes the user may want.
+    diff = paper.propose_create("sections/method.tex", "M.\n")
+    paper.apply_pending("main.tex", diff.id)
+
+    result = paper.undo_last("main.tex")
+
+    assert result.applied
+    assert "\\input{sections/method}" not in paper.read_section("main.tex")
+    assert (paper.root / "sections" / "method.tex").exists()
+
+
 def test_approve_writes_snapshots_and_clears_pending(paper):
     diff = paper.propose_patch("sections/intro.tex",
                                "It works well.", "It achieves SOTA.")

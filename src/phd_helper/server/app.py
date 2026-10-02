@@ -7,11 +7,14 @@ ZeroTier membership is the access control (§1).
 """
 
 import asyncio
+import io
 import json
+import re
 import time
+import zipfile
 from contextlib import asynccontextmanager
 from datetime import date, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -47,6 +50,10 @@ SYSTEM_PROMPT = (
     "2. Questions about the writing of the current section (flow, clarity, "
     "comparisons within it) are answered directly from context, with no "
     "tool call.\n"
+    "3. A part the user asks for that does not exist yet is a new file: "
+    "emit `section_create` (after = the section to follow, empty string "
+    "for the document end) — never append a new part into an existing "
+    "section instead.\n"
     "When speaking, pre-normalize math to words (say 'E equals m c "
     "squared', not symbols) — the TTS engine hallucinates on dense symbol "
     "strings.\n")
@@ -76,10 +83,10 @@ class Session:
         # pending. While any ride, the next utterance is interpreted
         # against the approval by the agent (the note in _build_context).
         self.pending_diffs: list[dict] = []
-        # §7/§8 reopen: diffs already pending when this sitting opened,
-        # reconciled once (re-anchored or bounced) and re-presented to
-        # every socket that attaches — disk is the truth, the cards ride it.
-        self.pending_sent = False
+        # §7/§8 reopen: the live pending diffs as of the last attach,
+        # reconciled (re-anchored or bounced) against disk and re-presented
+        # to every socket that attaches — disk is the truth, the cards
+        # ride it. Rebuilt on every attach, never accumulated.
         self.live_pending: list = []
         self.last_active = time.monotonic()
         self.recap_sent = False
@@ -289,13 +296,21 @@ class Session:
                         # One-at-a-time diff awaiting approval (§5). The
                         # result's find/replace are the final ones (cite_add
                         # rewrites the \\cite key); section_write has none.
-                        find = result.get("find", vc.args["find"])
-                        replace = result.get("replace",
-                                            vc.args["replace"])
-                        await self.send({"type": "diff",
-                                         "diff_id": result["diff_id"],
-                                         "section": result["section"],
-                                         "find": find, "replace": replace})
+                        # section_create carries its own find/replace (the
+                        # wiring); .get defaults must stay lazy — the
+                        # eager vc.args["find"] KeyError'd on creates.
+                        find = result.get("find") or vc.args.get("find", "")
+                        replace = (result.get("replace")
+                                   or vc.args.get("replace", ""))
+                        card = {"type": "diff",
+                                "diff_id": result["diff_id"],
+                                "section": result["section"],
+                                "find": find, "replace": replace}
+                        if result.get("created"):
+                            # section_create: the card shows the new
+                            # file's bytes, not just the wiring line.
+                            card["created"] = result["created"]
+                        await self.send(card)
                         # The approval window opens: later turns' notes
                         # carry this diff until it resolves (§3). Only the
                         # id/section are mirrored — the note reads the
@@ -664,40 +679,48 @@ async def revalidate_pending(state, sitting: Session,
     gets them back through the apply-time hash check / re-anchor path —
     bounced ones resolve with their reason, live ones become cards again
     and re-enter the sitting's approval window, so the next utterance is
-    interpreted against them (§3). Reconcile runs once per sitting; the
-    cards are sent to every socket that attaches."""
-    if not sitting.pending_sent:
-        sitting.pending_sent = True
-        by_sec: dict[str, list] = {}
-        for d in state.project.pending.list_all():
-            by_sec.setdefault(d.section_path, []).append(d)
-        for section, ds in by_sec.items():
-            try:
-                text = state.project.read_section(section)
-            except OSError:
-                for d in ds:  # the file itself is gone: nothing to
-                    state.project.reject_pending(section, d.id)  # re-anchor
-                    await ws.send_text(json.dumps(
-                        {"type": "diff_resolved", "diff_id": d.id,
-                         "applied": False,
-                         "reason": "section file is gone", "text": None}))
-                continue
-            for out in state.project.pending.reconcile(section, text):
-                if out.bounce_reason:
-                    await ws.send_text(json.dumps(
-                        {"type": "diff_resolved", "diff_id": out.diff.id,
-                         "applied": False, "reason": out.bounce_reason,
-                         "text": None}))
-                else:
-                    sitting.live_pending.append(out.diff)
-                    if not any(t["diff_id"] == out.diff.id
-                               for t in sitting.pending_diffs):
-                        sitting.pending_diffs.append(
-                            {"diff_id": out.diff.id, "section": section})
-    for d in sitting.live_pending:
-        await ws.send_text(json.dumps(
-            {"type": "diff", "diff_id": d.id, "section": d.section_path,
-             "find": d.patch.find, "replace": d.patch.replace}))
+    interpreted against them (§3). Runs on EVERY attach: a diff proposed
+    mid-sitting is disk truth too, and a tab that opens later (the phone
+    reconnecting) gets the same cards — live_pending is rebuilt from
+    disk each time, so approved/discarded diffs never replay."""
+    live: list = []
+    by_sec: dict[str, list] = {}
+    for d in state.project.pending.list_all():
+        by_sec.setdefault(d.section_path, []).append(d)
+    for section, ds in by_sec.items():
+        try:
+            text = state.project.read_section(section)
+        except OSError:
+            for d in ds:  # the file itself is gone: nothing to
+                state.project.reject_pending(section, d.id)  # re-anchor
+                # Fan-out: a bounce on one tab's attach is disk truth
+                # for every tab — ghost cards go everywhere (#27).
+                await sitting.send({"type": "diff_resolved",
+                                    "diff_id": d.id, "applied": False,
+                                    "reason": "section file is gone",
+                                    "text": None})
+            continue
+        for out in state.project.pending.reconcile(section, text):
+            if out.bounce_reason:
+                await sitting.send({"type": "diff_resolved",
+                                    "diff_id": out.diff.id,
+                                    "applied": False,
+                                    "reason": out.bounce_reason,
+                                    "text": None})
+            else:
+                live.append(out.diff)
+                if not any(t["diff_id"] == out.diff.id
+                           for t in sitting.pending_diffs):
+                    sitting.pending_diffs.append(
+                        {"diff_id": out.diff.id, "section": section})
+    sitting.live_pending = live
+    for d in live:
+        card = {"type": "diff", "diff_id": d.id, "section": d.section_path,
+                "find": d.patch.find, "replace": d.patch.replace}
+        if d.create_path is not None:
+            card["created"] = {"path": d.create_path,
+                               "content": d.create_content}
+        await ws.send_text(json.dumps(card))
 
 
 async def sync_socket(state, sitting: Session, client_id: str,
@@ -920,6 +943,135 @@ def create_app(state: "AppState | None" = None,
                     "children": [node(c) for c in n.children]}
         return [node(n) for n in state.project.section_tree()]
 
+    # -- file doors (issue #28): the user's own hand on the active
+    # project, not the agent's — direct writes, no §5 gate (the §5
+    # pending-diff path is for proposals; these are instructions).
+    # Remove is a soft delete into .phd-helper/trash/ — the door IS the
+    # undo; restore re-wires at the end of main.tex (original position
+    # lost, documented). main.tex and refs.bib are never targets.
+
+    def _safe_tex_relpath(raw: str) -> str | None:
+        """A relative .tex path inside the project, or None."""
+        p = PurePosixPath(str(raw).replace("\\", "/"))
+        if (not str(raw).endswith(".tex") or p.is_absolute()
+                or ".." in p.parts or not p.parts):
+            return None
+        return p.as_posix()
+
+    def _wire_input(main: str, stem: str) -> str:
+        return main.replace(
+            "\\end{document}",
+            f"\\input{{{stem}}}\n" + "\\end{document}", 1)
+
+    def _unwire_input(main: str, rel: str) -> str:
+        """Drop the \\input/\\include line resolving to `rel` (the same
+        resolution _input_line_for quotes from — disk truth, not a
+        guessed string)."""
+        out = []
+        for line in main.splitlines(keepends=True):
+            m = re.search(r"\\(?:input|include)\{([^}]*)\}", line)
+            arg = m.group(1) if m else None
+            if arg is not None and (
+                    arg if arg.endswith(".tex") else f"{arg}.tex") == rel:
+                continue
+            out.append(line)
+        return "".join(out)
+
+    @app.get("/project/files")
+    async def project_files():
+        def walk(nodes):
+            for n in nodes:
+                yield n.path
+                yield from walk(n.children)
+        linked = set(walk(state.project.section_tree()))
+        files = [{"path": p, "linked": p in linked}
+                 for p in sorted(state.project.files().keys())
+                 if p != state.project.root_file]  # the spine stays put
+        trash_dir = state.project.state_dir / "trash"
+        trash = sorted(p.relative_to(trash_dir).as_posix()
+                       for p in trash_dir.rglob("*") if p.is_file()) \
+            if trash_dir.is_dir() else []
+        return {"files": files, "trash": trash}
+
+    @app.post("/project/files")
+    async def project_file_upload(request: Request, name: str = ""):
+        p = PurePosixPath(name.replace("\\", "/"))
+        if len(p.parts) != 1 or not name.endswith(".tex") or p.name == ".tex":
+            return JSONResponse({"error": f"bad file name: {name}"},
+                                status_code=400)
+        rel = f"sections/{p.name}"
+        target = state.project.root / rel
+        if target.exists():
+            return JSONResponse({"error": f"file already exists: {rel}"},
+                                status_code=409)
+        data = await request.body()
+        main = state.project.read_section(state.project.root_file)
+        if "\\end{document}" not in main:
+            return JSONResponse(
+                {"error": f"no \\end{{document}} in "
+                          f"{state.project.root_file}: cannot wire"},
+                status_code=409)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        # Ratified: uploads auto-\input at the end of the document.
+        state.project.write_section(
+            state.project.root_file,
+            _wire_input(main, rel[: -len(".tex")]))
+        return {"path": rel}
+
+    @app.post("/project/files/remove")
+    async def project_file_remove(request: Request):
+        body = await request.json()
+        rel = _safe_tex_relpath(str(body.get("path", "")))
+        if rel is None or rel.casefold() == state.project.root_file.casefold():
+            # Casefolded: on a case-insensitive filesystem "Main.tex" IS
+            # main.tex, and an exact compare would strand the spine in trash.
+            return JSONResponse({"error": "can only remove .tex parts"},
+                                status_code=400)
+        target = state.project.root / rel
+        if not target.is_file():
+            return JSONResponse({"error": f"no such file: {rel}"},
+                                status_code=404)
+        trash_dir = state.project.state_dir / "trash"
+        dest = trash_dir / rel
+        if dest.exists():  # a second removal of the same path keeps both
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            dest = dest.with_name(f"{dest.stem}-{stamp}{dest.suffix}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        target.replace(dest)  # bytes land in trash first; then unwire
+        main = state.project.read_section(state.project.root_file)
+        state.project.write_section(state.project.root_file,
+                                    _unwire_input(main, rel))
+        return {"removed": rel,
+                "trash": dest.relative_to(trash_dir).as_posix()}
+
+    @app.post("/project/files/restore")
+    async def project_file_restore(request: Request):
+        body = await request.json()
+        rel = _safe_tex_relpath(str(body.get("path", "")))
+        if rel is None:
+            return JSONResponse({"error": "bad path"}, status_code=400)
+        src = state.project.state_dir / "trash" / rel
+        if not src.is_file():
+            return JSONResponse({"error": f"nothing in trash: {rel}"},
+                                status_code=404)
+        target = state.project.root / rel
+        if target.exists():
+            return JSONResponse({"error": f"file already exists: {rel}"},
+                                status_code=409)
+        main = state.project.read_section(state.project.root_file)
+        if "\\end{document}" not in main:
+            return JSONResponse(
+                {"error": f"no \\end{{document}} in "
+                          f"{state.project.root_file}: cannot wire"},
+                status_code=409)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        src.replace(target)
+        # Documented: the part rejoins at the end, not its old slot.
+        state.project.write_section(
+            state.project.root_file, _wire_input(main, rel[: -len(".tex")]))
+        return {"restored": rel}
+
     # -- corpus doors and status (SPEC §6): upload is door 1, the agent
     # fetch/auto-join is door 2; the UI reads status, never searches.
 
@@ -1122,7 +1274,7 @@ def create_app(state: "AppState | None" = None,
 
     # -- projects (SPEC §7): server-side list, one active at a time;
     # switching ends the sitting (distillation runs) and lands there,
-    # remembered across restarts. New/Import are later slices.
+    # remembered across restarts. New scaffolds, Import unzips (#28).
 
     @app.get("/projects")
     async def projects():
@@ -1146,6 +1298,92 @@ def create_app(state: "AppState | None" = None,
         state.project = Project(target)
         save_last_project(root, target)
         return {"active": target.name}
+
+    def _project_name_ok(name: str) -> bool:
+        p = PurePosixPath(name.replace("\\", "/"))
+        return (bool(name) and len(p.parts) == 1
+                and not name.startswith((".", "_")))
+
+    @app.post("/projects/new")
+    async def project_new(request: Request):
+        root = getattr(state, "projects_root", REPO_ROOT)
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        if not _project_name_ok(name):
+            return JSONResponse({"error": f"bad project name: {name}"},
+                                status_code=400)
+        target = root / name
+        if target.exists():
+            return JSONResponse({"error": f"project already exists: {name}"},
+                                status_code=409)
+        (target / "sections").mkdir(parents=True)
+        (target / "main.tex").write_text(
+            "\\documentclass{article}\n\\begin{document}\n"
+            "\\input{sections/intro}\n\\end{document}\n",
+            encoding="utf-8")
+        (target / "sections" / "intro.tex").write_text(
+            "\\section{Introduction}\n", encoding="utf-8")
+        (target / "refs.bib").write_text("", encoding="utf-8")
+        await end_sitting(state, "switch")  # the old sitting folds first
+        state.project = Project(target)
+        save_last_project(root, target)
+        return {"active": name}
+
+    @app.post("/projects/import")
+    async def project_import(request: Request, name: str = ""):
+        # A remote device cannot browse the server's disk, so import is
+        # a zip upload (issue #28): .tex/.bib members only, zip-slip
+        # guarded, main.tex required at the root (or under one top-level
+        # folder, which is stripped).
+        root = getattr(state, "projects_root", REPO_ROOT)
+        if not _project_name_ok(name):
+            return JSONResponse({"error": f"bad project name: {name}"},
+                                status_code=400)
+        target = root / name
+        if target.exists():
+            return JSONResponse({"error": f"project already exists: {name}"},
+                                status_code=409)
+        data = await request.body()
+        if len(data) > 25 * 1024 * 1024:
+            return JSONResponse({"error": "zip too large (25 MB cap)"},
+                                status_code=413)
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(data))
+        except zipfile.BadZipFile:
+            return JSONResponse({"error": "not a zip file"},
+                                status_code=400)
+        with zf:
+            members = [i for i in zf.infolist() if not i.is_dir()]
+            names = [i.filename for i in members]
+            for n in names:
+                m = PurePosixPath(n)
+                if (m.is_absolute() or ".." in m.parts or "\\" in n
+                        or m.suffix.lower() not in (".tex", ".bib")):
+                    return JSONResponse(
+                        {"error": f"zip member not allowed: {n}"},
+                        status_code=400)
+            if sum(i.file_size for i in members) > 100 * 1024 * 1024:
+                return JSONResponse({"error": "zip unpacks too large"},
+                                    status_code=413)
+            prefix = ""
+            if "main.tex" not in names:
+                tops = {n.split("/", 1)[0] for n in names}
+                if len(tops) == 1 and f"{next(iter(tops))}/main.tex" in names:
+                    prefix = f"{next(iter(tops))}/"
+                else:
+                    return JSONResponse(
+                        {"error": "no main.tex in the zip"},
+                        status_code=400)
+            # Validate-then-extract: a refused zip leaves no half project.
+            for i in members:
+                rel = i.filename[len(prefix):] if prefix else i.filename
+                dest = target / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(zf.read(i))
+        await end_sitting(state, "switch")
+        state.project = Project(target)
+        save_last_project(root, target)
+        return {"active": name}
 
     # Private-CA root cert for devices to install (public half only; the CA
     # key never leaves certs/, which is gitignored).

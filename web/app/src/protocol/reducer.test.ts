@@ -198,6 +198,16 @@ describe("diffs", () => {
     ]);
   });
 
+  it("a create card carries the new file's bytes (#28)", () => {
+    const s = fold({
+      ...diff,
+      created: { path: "sections/related.tex", content: "Prior work.\n" },
+    });
+    expect(s.pendingDiffs[0]).toMatchObject({
+      created: { path: "sections/related.tex", content: "Prior work.\n" },
+    });
+  });
+
   it("approve resolves the card with the section named", () => {
     const s = fold(diff, {
       type: "diff_resolved",

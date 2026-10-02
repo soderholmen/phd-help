@@ -32,6 +32,18 @@ describe("DiffCard", () => {
     expect(onReject).toHaveBeenCalledWith(card);
   });
 
+  it("a create card names the new file and previews its bytes", () => {
+    render(
+      <DiffCard
+        card={{ ...card, created: { path: "sections/related.tex", content: "Prior work.\n" } }}
+        onApprove={() => {}}
+        onReject={() => {}}
+      />,
+    );
+    expect(screen.getByText(/^creates sections\/related\.tex$/)).toBeInTheDocument();
+    expect(screen.getByText(/^Prior work\./).tagName).toBe("INS");
+  });
+
   it("one decision per card: both buttons go dead after a click", () => {
     const onApprove = vi.fn();
     const onReject = vi.fn();

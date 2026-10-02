@@ -15,6 +15,9 @@ export type ServerEvent =
       section: string;
       find: string;
       replace: string;
+      // section_create (#28): a new file's bytes ride the same approval;
+      // the find/replace above is then the \input wiring into main.tex.
+      created?: { path: string; content: string };
     }
   | {
       type: "diff_resolved";

@@ -10,6 +10,19 @@ import { PcmPlayer } from "./voice/playback";
 import { BARGE_CHUNKS, BARGE_RMS, BargeGate, RESUME_WINDOW_MS } from "./voice/barge";
 import { fetchHealth, fetchTree } from "./api/sections";
 import { listDocs, pin, retry, unpin, uploadPdf, type UploadMeta } from "./api/corpus";
+import {
+  activateProject,
+  importProject,
+  listProjects,
+  newProject,
+} from "./api/projects";
+import {
+  listFiles,
+  removeFile,
+  restoreFile,
+  uploadFile,
+  type ProjectFile,
+} from "./api/files";
 import type { CorpusDoc, Health, SectionNode } from "./types";
 import { Header } from "./components/Header";
 import { SectionTree } from "./components/SectionTree";
@@ -17,6 +30,7 @@ import { Transcript } from "./components/Transcript";
 import { Composer } from "./components/Composer";
 import { DiffCard } from "./components/DiffCard";
 import { CorpusPanel } from "./components/CorpusPanel";
+import { FilesPanel } from "./components/FilesPanel";
 
 export default function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
@@ -60,21 +74,39 @@ export default function App() {
   const [tree, setTree] = useState<SectionNode[]>([]);
   const [docs, setDocs] = useState<CorpusDoc[]>([]);
   const [health, setHealth] = useState<Health | null>(null);
+  const [projects, setProjects] = useState<string[]>([]);
+  const [active, setActive] = useState("");
+  const [files, setFiles] = useState<ProjectFile[]>([]);
+  const [trash, setTrash] = useState<string[]>([]);
 
-  // One 3 s poll for tree + health + corpus status: indexing is async
-  // and must be visible (§6), and the agent can restructure the paper
-  // (a new \input) so the tree is not fetch-once. A backgrounded tab
-  // stays quiet and catches up on focus (§3's visibility discipline);
-  // the three doors are independent, so they fan out.
+  // One 3 s poll for tree + health + corpus status + projects + files:
+  // indexing is async and must be visible (§6), and the agent can
+  // restructure the paper (a new \input) so the tree is not fetch-once.
+  // A backgrounded tab stays quiet and catches up on focus (§3's
+  // visibility discipline); the doors are independent, so they fan out.
   useEffect(() => {
     let stop = false;
     const tick = async () => {
-      const [t, h, d] = await Promise.allSettled([fetchTree(), fetchHealth(), listDocs()]);
+      const [t, h, d, p, f] = await Promise.allSettled([
+        fetchTree(),
+        fetchHealth(),
+        listDocs(),
+        listProjects(),
+        listFiles(),
+      ]);
       if (stop) return;
       if (t.status === "fulfilled") setTree(t.value);
       if (h.status === "fulfilled") setHealth(h.value);
       else setHealth(null);
       if (d.status === "fulfilled") setDocs(d.value);
+      if (p.status === "fulfilled") {
+        setProjects(p.value.projects);
+        setActive(p.value.active);
+      }
+      if (f.status === "fulfilled") {
+        setFiles(f.value.files);
+        setTrash(f.value.trash);
+      }
     };
     const go = () => {
       if (!document.hidden) void tick();
@@ -143,6 +175,36 @@ export default function App() {
     conn.send(typed(text));
   };
 
+  // Project and file doors (#28). Switching ends the sitting
+  // server-side — the session_ended event clears the old project's
+  // cards, and the 3 s tick refreshes tree/docs/files. Failures ride
+  // the transcript like every other §8 notice (FilesPanel keeps its
+  // own error line for uploads, CorpusPanel's discipline).
+  const notice =
+    (label: string) =>
+    (e: unknown) =>
+      dispatch({
+        type: "local_notice",
+        text: `${label}: ${e instanceof Error ? e.message : "failed"}`,
+      });
+
+  const onActivate = (name: string) =>
+    void activateProject(name)
+      .then((r) => setActive(r.active))
+      .catch(notice(`Switch to ${name}`));
+  const onNew = (name: string) =>
+    void newProject(name)
+      .then((r) => setActive(r.active))
+      .catch(notice(`New project ${name}`));
+  const onImport = (name: string, bytes: ArrayBuffer) =>
+    void importProject(name, bytes)
+      .then((r) => setActive(r.active))
+      .catch(notice(`Import ${name}`));
+  const onRemove = (path: string) =>
+    void removeFile(path).catch(notice(`Remove ${path}`));
+  const onRestore = (path: string) =>
+    void restoreFile(path).catch(notice(`Restore ${path}`));
+
   return (
     <div className="shell">
       <Header
@@ -150,7 +212,12 @@ export default function App() {
         armed={state.armed}
         rms={state.rms}
         health={health}
+        projects={projects}
+        active={active}
         onToggleVoice={() => void toggleVoice()}
+        onActivate={onActivate}
+        onNew={onNew}
+        onImport={onImport}
       />
       <div className="panels">
         <aside className="left">
@@ -179,6 +246,13 @@ export default function App() {
             onRetry={(id) => void retry(id).catch(() => {})}
             onPin={(id) => void pin(id).catch(() => {})}
             onUnpin={(id) => void unpin(id).catch(() => {})}
+          />
+          <FilesPanel
+            files={files}
+            trash={trash}
+            onUpload={(name, bytes) => uploadFile(name, bytes)}
+            onRemove={onRemove}
+            onRestore={onRestore}
           />
         </aside>
       </div>

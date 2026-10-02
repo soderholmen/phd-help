@@ -1,6 +1,7 @@
 // A pending anchored patch (§5): raw find/replace — diffs are never
 // rendered, approving a render artifact is the failure mode. Approval
-// is on-screen; voice may initiate, never confirm (§3).
+// is on-screen; voice may initiate, never confirm (§3). A create card
+// (#28) shows the new file's bytes above the wiring patch it rides.
 import { useState } from "react";
 import type { DiffCard as DiffCardData } from "../protocol/types";
 
@@ -18,7 +19,15 @@ export function DiffCard({ card, onApprove, onReject }: Props) {
     <li className="diff" data-diff-id={card.diff_id}>
       <header>
         <code>{card.section}</code>
+        {card.created && (
+          <span className="creates">creates {card.created.path}</span>
+        )}
       </header>
+      {card.created && (
+        <pre className="creates-body">
+          <ins>{card.created.content}</ins>
+        </pre>
+      )}
       <pre className="find">
         <del>{card.find}</del>
       </pre>

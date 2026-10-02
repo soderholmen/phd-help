@@ -18,6 +18,11 @@ class PendingDiff:
     # The cite loop (§6): a bib entry rides the same approval as the patch.
     bib_append: str | None = None
     cite_key: str | None = None
+    # section_create: a new file's bytes ride the same approval (the
+    # bib_append pattern) — the patch wires it into main.tex, and both
+    # halves land together on apply or neither does.
+    create_path: str | None = None
+    create_content: str | None = None
 
 
 @dataclass(frozen=True)
@@ -38,7 +43,8 @@ class PendingDiffs:
         return self._root / slug
 
     def propose(self, section_path: str, patch: AnchoredPatch,
-                proposed_text: str, bib_append: str | None = None) -> str:
+                proposed_text: str, bib_append: str | None = None,
+                create: tuple[str, str] | None = None) -> str:
         d = self._dir(section_path)
         d.mkdir(parents=True, exist_ok=True)
         # Ids are globally unique, not per-section: voice addresses a diff
@@ -57,6 +63,8 @@ class PendingDiffs:
                     "proposed_text": proposed_text,
                     "bib_append": bib_append,
                     "section": section_path,
+                    "create": None if create is None else
+                    {"path": create[0], "content": create[1]},
                 }
             ),
             encoding="utf-8",
@@ -83,6 +91,7 @@ class PendingDiffs:
         if section is None:
             section = meta.get("section") or \
                 p.parent.name.replace("__", "/")  # pre-section-field files
+        create = meta.get("create") or {}
         return PendingDiff(
             id=p.stem,
             section_path=section,
@@ -91,6 +100,8 @@ class PendingDiffs:
             ),
             proposed_text=meta["proposed_text"],
             bib_append=meta.get("bib_append"),
+            create_path=create.get("path"),
+            create_content=create.get("content"),
         )
 
     def list_pending(self, section_path: str) -> list[PendingDiff]:

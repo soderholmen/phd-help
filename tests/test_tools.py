@@ -70,6 +70,28 @@ def test_validator_flags_unknown_section(paper):
     assert v({"section": "sections/nope.tex", "find": "x", "replace": "y"})
 
 
+def test_section_create_validator_rejects_an_existing_target(paper):
+    v = make_validators(paper)["section_create"]
+    assert v({"section": "sections/intro.tex", "content": "x\n"})
+
+
+def test_section_create_validator_accepts_a_new_path(paper):
+    v = make_validators(paper)["section_create"]
+    assert v({"section": "sections/method.tex", "content": "x\n"}) is None
+
+
+def test_execute_section_create_returns_pending_with_created(paper):
+    result = execute(call("section_create", {"section": "sections/method.tex",
+                                             "content": "M.\n"}), paper)
+
+    assert result["status"] == "pending"
+    assert result["section"] == "main.tex"
+    assert result["created"] == {"path": "sections/method.tex",
+                                 "content": "M.\n"}
+    # nothing on disk until the approval lands
+    assert not (paper.root / "sections" / "method.tex").exists()
+
+
 def test_execute_section_read(paper):
     result = execute(call("section_read", {"section": "sections/intro.tex"}),
                      paper)
