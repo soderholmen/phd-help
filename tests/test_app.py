@@ -396,6 +396,76 @@ def test_health_reports_paused_without_a_store(tmp_path):
         assert c.get("/health").json()["corpus"] == "paused"
 
 
+class ProbedEmbedder:
+    """Corpus sidecar client stand-in: the store's own probe never
+    encodes (lancedb_store.py), so /health must ask the embedder."""
+
+    def __init__(self, ok=True, faulted=False):
+        self.ok = ok
+        self._faulted = faulted
+        self.probes = 0
+
+    def faulted(self):
+        return self._faulted
+
+    def healthy(self):  # sync — app.py offloads it via to_thread
+        self.probes += 1
+        return self.ok
+
+
+def test_health_embedder_counter_flips_the_chip_without_network(tmp_path):
+    store = ProbedStore(ok=True)
+    emb = ProbedEmbedder(ok=True, faulted=True)
+    store.embedder = emb
+    with TestClient(create_app(state=health_state(tmp_path, store))) as c:
+        assert c.get("/health").json()["corpus"] == "faulted"
+    assert emb.probes == 0  # counter beats a fresh probe: zero network
+
+
+def test_health_embedder_probe_fault_flips_the_corpus_chip(tmp_path):
+    # Sidecar up on /health but the counter clean, yet the probe says
+    # no (e.g. it answers 503 while loading): the chip must not lie ok.
+    store = ProbedStore(ok=True)
+    store.embedder = ProbedEmbedder(ok=False)
+    with TestClient(create_app(state=health_state(tmp_path, store))) as c:
+        assert c.get("/health").json()["corpus"] == "faulted"
+
+
+def test_health_embedder_without_healthy_keeps_the_store_verdict(tmp_path):
+    # The in-process classes (the 3090 slice) have neither faulted() nor
+    # healthy(): the store's own verdict stands, unchanged.
+    store = ProbedStore(ok=True)
+    store.embedder = SimpleNamespace()
+    with TestClient(create_app(state=health_state(tmp_path, store))) as c:
+        assert c.get("/health").json()["corpus"] == "ok"
+
+
+def test_health_store_fault_skips_the_embedder_probe(tmp_path):
+    store = ProbedStore(ok=False)
+    emb = ProbedEmbedder(ok=True)
+    store.embedder = emb
+    with TestClient(create_app(state=health_state(tmp_path, store))) as c:
+        assert c.get("/health").json()["corpus"] == "faulted"
+    assert emb.probes == 0  # already faulted upstream: nothing to ask
+
+
+class ClosingClient:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def test_shutdown_closes_the_corpus_clients(tmp_path):
+    store = ProbedStore(ok=True)
+    emb, rr = ClosingClient(), ClosingClient()
+    store.embedder, store.reranker = emb, rr
+    with TestClient(create_app(state=health_state(tmp_path, store))):
+        pass
+    assert emb.closed and rr.closed  # sync close, owned clients only
+
+
 # -- per-section gists wiring (SPEC §4) --------------------------------------
 
 

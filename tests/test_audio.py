@@ -301,11 +301,12 @@ async def test_moss_tts_close_is_best_effort():
 
 # --- sidecar topology pin ---------------------------------------------------
 
-def test_asr_sidecar_never_imports_the_backend():
-    # The sidecar venv has no phd_helper installed, and the backend venv
-    # must never gain a path to loading torch in-process (SAC). The only
-    # honest guarantee is a pin — an AST one, so prose may name the sin.
-    for script in ("asr_server.py", "tts_server.py"):
+def test_sidecar_scripts_never_import_the_backend():
+    # The sidecar venvs have no phd_helper installed, and the backend
+    # venv must never gain a path to loading torch in-process (SAC). The
+    # only honest guarantee is a pin — an AST one, so prose may name the
+    # sin.
+    for script in ("asr_server.py", "tts_server.py", "corpus_server.py"):
         src = (Path(__file__).resolve().parents[1] / "scripts"
                / script).read_text(encoding="utf-8")
         imported = set()

@@ -89,10 +89,15 @@ class Config:
     crossref_mailto: str = os.environ.get("PHD_CROSSREF_MAILTO", "")
     openalex_mailto: str = os.environ.get("PHD_OPENALEX_MAILTO", "")
     # Where the heavy corpus stack runs: "off" keeps the §8 degraded path
-    # (store down, docs visibly queued); "local" wires MinerU + harrier +
-    # LanceDB on this machine (dev box today, the 3090 later — the server
-    # stays prod, this only picks where the adapters live).
+    # (store down, docs visibly queued); "local" wires MinerU + LanceDB
+    # here and the MODELS (harrier embed, Qwen rerank) over the corpus
+    # sidecar — SAC blocks torch in this venv (docs/corpus-stack.md). The
+    # in-process HarrierEmbedder/QwenReranker stay in-tree for the 3090
+    # prod slice, where torch loads again.
     corpus_stack: str = os.environ.get("PHD_CORPUS_STACK", "off")
+    corpus_url: str = field(
+        default_factory=lambda: os.environ.get(
+            "PHD_CORPUS_URL", "http://127.0.0.1:8091"))
     # Where the voice stack runs: "off" keeps the stubs (§8 honest
     # silence); "local" talks to the STT/TTS sidecars — separate py3.12
     # processes, because SAC blocks torch in this venv and NeMo needs 3.12

@@ -380,20 +380,24 @@ class AppState:
         self.end_fut: asyncio.Future | None = None
         # One global corpus across projects (§6). The registry is live
         # always; the heavy stack is config-gated (PHD_CORPUS_STACK):
-        # "off" degrades per the §8 matrix, "local" runs MinerU + harrier
-        # + LanceDB on this machine. Imports stay inside the branch so the
-        # off path never pays for lancedb/torch.
+        # "off" degrades per the §8 matrix, "local" runs MinerU + LanceDB
+        # here and the models (harrier embed, Qwen rerank) over the corpus
+        # sidecar — SAC blocks torch in this venv (docs/corpus-stack.md).
+        # The in-process HarrierEmbedder/QwenReranker stay in-tree for the
+        # 3090 prod slice, where torch loads again. Imports stay inside
+        # the branch so the off path never pays for lancedb.
         self.corpus = Corpus(REPO_ROOT / "corpus_data")
         self.corpus_store = None
         extractor = None
         if self.config.corpus_stack == "local":
-            from phd_helper.server.embed import HarrierEmbedder
+            from phd_helper.server.corpus_sidecar import (SidecarEmbedder,
+                                                          SidecarReranker)
             from phd_helper.server.lancedb_store import LanceStore
             from phd_helper.server.mineru import MinerUExtractor
-            from phd_helper.server.rerank import QwenReranker
             self.corpus_store = LanceStore(
-                REPO_ROOT / "corpus_data" / "lancedb", HarrierEmbedder(),
-                reranker=QwenReranker())  # lazy: loads on first search
+                REPO_ROOT / "corpus_data" / "lancedb",
+                SidecarEmbedder(self.config.corpus_url),
+                reranker=SidecarReranker(self.config.corpus_url))
             extractor = MinerUExtractor()
         # Voice stack, same gate shape (PHD_AUDIO_STACK): "off" keeps the
         # stubs (§8 honest silence); "local" swaps in thin clients over the
@@ -794,6 +798,14 @@ def create_app(state: "AppState | None" = None,
                              getattr(state, "tts", None)):
                 if provider is not None and hasattr(provider, "aclose"):
                     await provider.aclose()
+            # Corpus sidecar clients are sync httpx — a separate, sync
+            # close loop (same both-guards shape as the audio one above,
+            # since test states carry stores without clients).
+            store = getattr(state, "corpus_store", None)
+            for client in (getattr(store, "embedder", None),
+                           getattr(store, "reranker", None)):
+                if client is not None and hasattr(client, "close"):
+                    client.close()
 
     app = FastAPI(title="phd-helper", lifespan=lifespan)
     app.state.phd = state
@@ -805,6 +817,22 @@ def create_app(state: "AppState | None" = None,
         corpus = "paused"
         if state.corpus_store is not None:
             corpus = "ok" if await state.corpus_store.healthy() else "faulted"
+            # The store's own probe never encodes (lancedb_store.py), so
+            # a dead embedder would hide behind an ok chip while every
+            # search CORPUS_DOWNs. Duck-typed on faulted() like the audio
+            # probe: the in-process classes and the test stores don't
+            # have it and keep reading through. Counter first (faulted
+            # beats a fresh probe, zero network while faulted), then the
+            # probe offloaded — a wedged sidecar must not stall the
+            # event loop the shell's 3 s health poll runs on.
+            emb = getattr(state.corpus_store, "embedder", None)
+            if corpus == "ok" and emb is not None and hasattr(emb,
+                                                              "faulted"):
+                if emb.faulted():
+                    corpus = "faulted"
+                elif hasattr(emb, "healthy"):
+                    corpus = ("ok" if await asyncio.to_thread(emb.healthy)
+                              else "faulted")
 
         async def audio_status(p):
             # Stubs answer "stub"; sidecar adapters answer with a live

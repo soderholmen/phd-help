@@ -61,3 +61,14 @@ def test_malformed_vad_threshold_fails_loudly_at_construction(monkeypatch):
         Config()
     monkeypatch.setenv("PHD_VAD_THRESHOLD", "0.02")
     assert Config().vad_threshold == 0.02
+
+
+def test_corpus_url_defaults_to_the_sidecar_port():
+    assert Config().corpus_url == "http://127.0.0.1:8091"
+
+
+def test_corpus_url_reads_env_at_construction(monkeypatch):
+    # default_factory like the audio URLs: a test (or a restarted
+    # process) can repoint the corpus sidecar.
+    monkeypatch.setenv("PHD_CORPUS_URL", "http://127.0.0.1:9991")
+    assert Config().corpus_url == "http://127.0.0.1:9991"
