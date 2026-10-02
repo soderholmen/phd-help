@@ -1008,6 +1008,15 @@ def create_app(state: "AppState | None" = None,
                         if sitting.sockets.get(client_id) is not ws:
                             await sync_socket(state, sitting, client_id, ws)
                         for final in finals:
+                            # The spoken words join the transcript the
+                            # way typed ones do — but only voice needs
+                            # this echo (the typing tab already added
+                            # its own optimistically), and it fans out:
+                            # every tab sees what the mic heard.
+                            await sitting.send({"type": "user_text",
+                                                "text": final,
+                                                "section": sitting.selected
+                                                or ""})
                             sitting.turn_task = asyncio.create_task(
                                 sitting.run_turn(final))
                     continue

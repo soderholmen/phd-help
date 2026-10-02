@@ -139,6 +139,27 @@ describe("turn taking", () => {
     expect(s.messages).toEqual([{ id: 1, role: "user", text: "tighten it", section: "sections/intro.tex" }]);
   });
 
+  it("user_text (a spoken utterance) joins as a user message", () => {
+    // Voice has no optimistic add — the server echo is the only path,
+    // and it carries the anchor the turn was logged with.
+    const s = fold({ type: "user_text", text: "tighten it", section: "sections/intro.tex" });
+    expect(s.messages).toEqual([
+      { id: 1, role: "user", text: "tighten it", section: "sections/intro.tex" },
+    ]);
+  });
+
+  it("local_notice surfaces a client-side failure as a notice", () => {
+    // The refused-mic path never reaches the server; the reducer still
+    // folds it like any other notice line.
+    const s = fold({
+      type: "local_notice",
+      text: "Mic needs HTTPS (or localhost)",
+    });
+    expect(s.messages).toEqual([
+      { id: 1, role: "notice", text: "Mic needs HTTPS (or localhost)" },
+    ]);
+  });
+
   it("assistant_text appends and ends the turn", () => {
     const s = fold({ type: "turn_started" }, { type: "assistant_text", text: "done" });
     expect(s.turnActive).toBe(false);

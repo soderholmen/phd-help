@@ -4,6 +4,9 @@
 // Server → client events.
 export type ServerEvent =
   | { type: "hello"; client_id: string; section: string | null }
+  // What the mic heard, fanned to every tab. Typed text is NOT echoed —
+  // the typing tab adds its own optimistically (LocalEvent user_send).
+  | { type: "user_text"; text: string; section: string }
   | { type: "turn_started" }
   | { type: "assistant_text"; text: string }
   | {
@@ -47,7 +50,8 @@ export type ControlFrame =
 export type LocalEvent =
   | { type: "connection_opened" }
   | { type: "connection_closed" }
-  | { type: "user_send"; text: string };
+  | { type: "user_send"; text: string }
+  | { type: "local_notice"; text: string };
 
 export type ShellEvent = ServerEvent | LocalEvent;
 

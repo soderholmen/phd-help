@@ -113,7 +113,20 @@ export default function App() {
     if (!state.armed) {
       try {
         await mic.start(); // needs the gesture; denial never arms
-      } catch {
+      } catch (e) {
+        // §8: the button must not look dead. Off-localhost plain HTTP
+        // is not a secure context — the browser refuses getUserMedia
+        // before the server is ever involved.
+        const name = e instanceof DOMException ? e.name : "";
+        const why =
+          name === "NotAllowedError"
+            ? "Mic permission denied — arm the mic in browser settings to go voice"
+            : name === "NotFoundError"
+              ? "No microphone found on this device"
+              : !navigator.mediaDevices?.getUserMedia
+                ? "Mic needs HTTPS (or localhost): this page is not a secure context — use typed chat, or open https://…"
+                : `Mic unavailable: ${name || "unknown error"}`;
+        dispatch({ type: "local_notice", text: why });
         return;
       }
       player.unlock(); // same gesture: the reply's AudioContext autoplay

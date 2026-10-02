@@ -298,9 +298,16 @@ def test_ws_binary_frames_drive_a_turn(tmp_path):
         with client.websocket_connect("/ws/voice?client=c1") as ws:
             assert ws.receive_json()["type"] == "hello"
             ws.send_bytes(b"\x00\x01" * 800)
-            types = []
-            while "assistant_text" not in types:
-                types.append(ws.receive_json()["type"])
+            events = []
+            while True:
+                ev = ws.receive_json()
+                events.append(ev)
+                if ev["type"] == "assistant_text":
+                    break
+    types = [e["type"] for e in events]
+    # the spoken words join the transcript ahead of the turn they open
+    assert types[0] == "user_text"
+    assert events[0]["text"] == "tighten the intro"
     assert "turn_started" in types
     joined = "\n".join(str(m.get("content") or "")
                        for m in state.llm.calls[0])

@@ -74,6 +74,14 @@ export function reducer(state: ShellState, event: ShellEvent): ShellState {
       return { ...state, clientId: event.client_id, selected: event.section };
     case "user_send":
       return withMessage(state, "user", event.text, state.selected ?? undefined);
+    case "local_notice":
+      // §8 honesty for client-side failures: a refused mic never reaches
+      // the server, so the reason has to come back as a transcript line.
+      return withMessage(state, "notice", event.text);
+    case "user_text":
+      // A spoken utterance joins the transcript like a typed one; the
+      // server carries the anchor it was logged with (§7 tagging).
+      return withMessage(state, "user", event.text, event.section || undefined);
     case "turn_started":
       return { ...state, turnActive: true };
     case "assistant_text":
