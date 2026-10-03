@@ -102,6 +102,14 @@ through the same episode code (same wire, same semantics).
 No holder armed ⇒ no synthesis at all (screen-only, the §8 TTS-down
 shape). Disarming stops playback.
 
+Before the gate rides `saytext.py`: `Unfence` keeps the ``` delimiter
+lines of a fenced draft out of the audio (the draft's prose itself is
+spoken — the ratified §3 carve-out, stepwise writing), and `for_speech`
+turns LaTeX into words (`\cite` → "citation", `$…$` → "formula", …)
+because the engine hallucinates on symbol strings. The screen and the
+history keep the raw source; the kill-switch leg applies the same
+filter one-shot (`strip_fences`).
+
 Barge-in: 200 ms of sustained AEC'd mic while playing pauses the
 playhead instantly and sends the control; while the agent is still
 composing the server **cancels the turn** and fans out `tts_stopped`,

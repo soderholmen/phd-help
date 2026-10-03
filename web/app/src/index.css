@@ -126,6 +126,16 @@ body { margin: 0; }
 .msg.user { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .msg.error { color: var(--bad); }
 .msg.notice { opacity: 0.7; font-size: 0.9rem; }
+.msg .text { white-space: pre-wrap; }
+.msg pre.draft {
+  margin: 0.4rem 0 0;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  background: #0003;
+  white-space: pre-wrap;
+  font-family: monospace;
+  font-size: 0.85rem;
+}
 .msg .anchor {
   display: inline-block;
   margin-right: 0.5rem;

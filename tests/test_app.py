@@ -17,6 +17,7 @@ from phd_helper.toolcall import ValidCall
 from phd_helper.endpoint import VoiceEndpoint
 from phd_helper.project import Project
 from phd_helper import sessionlog
+from phd_helper.saytext import for_speech, strip_fences
 from phd_helper.server.app import (Session, create_app, end_sitting,
                                    ensure_sitting, idle_expired)
 from phd_helper.server.config import Config
@@ -1475,7 +1476,8 @@ async def test_clearly_neither_keeps_the_diff_pending(tmp_path):
 
     assert not [e for e in events if e["type"] == "diff_resolved"]
     assert len(session.pending_diffs) == 1  # still awaiting approval
-    assert "pending_decide" in state.llm.calls[2][0]["content"]
+    # the note (not just the prompt, which names pending_decide too)
+    assert "PENDING DIFFS" in state.llm.calls[2][0]["content"]
 
 
 @pytest.mark.anyio
@@ -1550,8 +1552,9 @@ def test_client_reject_clears_the_approval_window(tmp_path):
             ws.send_json({"type": "typed", "text": "what is the budget?"})
             while ws.receive_json()["type"] != "assistant_text":
                 pass
-    # The turn after the client-side reject sees no pending note.
-    assert "pending_decide" not in state.llm.calls[2][0]["content"]
+    # The turn after the client-side reject sees no pending note (the
+    # prompt names pending_decide too, so check the note marker).
+    assert "PENDING DIFFS" not in state.llm.calls[2][0]["content"]
 
 
 @pytest.mark.anyio
@@ -1576,6 +1579,186 @@ async def test_voice_apply_all_only_touches_this_sessions_window(tmp_path):
     assert state.project.list_pending("sections/intro.tex")  # 0001 untouched
     assert "Old sitting's idea." not in \
         state.project.read_section("sections/intro.tex")
+
+
+# -- stepwise writing: spoken drafts, apply-from-draft ----------------------
+# The paragraph is decoded WHILE spoken (a fenced draft in the reply text,
+# not silent tool arguments); the apply turn is paperwork over words the
+# user already heard (from_draft substitutes the captured draft), and the
+# card stays the truth gate — including against the model itself: the
+# approval window is snapshotted at turn start, so a model cannot approve
+# a diff the user has not seen yet.
+
+DRAFT_TURN = ("Here is a paragraph for the intro:\n\n"
+              "```latex\nWe propose a sharper hook.\nIt leads with the "
+              "result.\n```\nSay add when you want it in.")
+
+
+@pytest.mark.anyio
+async def test_a_fenced_draft_is_captured_and_survives_plain_turns(tmp_path):
+    state, session, events = pending_env(tmp_path, [
+        text_step(DRAFT_TURN),
+        text_step("It cites the transformer paper."),  # interposed question
+    ])
+    await session.run_turn("add a hook to the intro")
+    assert session.draft == ("We propose a sharper hook.\n"
+                             "It leads with the result.")
+    # the screen keeps the raw source — fences included
+    ev = next(e for e in events if e["type"] == "assistant_text")
+    assert "```latex" in ev["text"]
+    events.clear()
+
+    await session.run_turn("what does it cite?")
+    assert session.draft  # a plain turn does not kill the draft
+
+
+@pytest.mark.anyio
+async def test_the_apply_turn_substitutes_the_draft_into_the_card(tmp_path):
+    state, session, events = pending_env(tmp_path, [
+        text_step(DRAFT_TURN),
+        tool_step("section_write",
+                  {"section": "sections/intro.tex",
+                   "find": "Intro body prose.", "replace": "",
+                   "from_draft": True}),
+        text_step("Card is up — say apply to land it."),
+        tool_step("pending_decide", {"diff_id": "0000", "decision": "apply"},
+                  "t2"),
+        text_step("Landed."),
+    ])
+    await session.run_turn("add a hook to the intro")
+    events.clear()
+
+    await session.run_turn("add it")
+
+    diff = next(e for e in events if e["type"] == "diff")
+    # the card shows the bytes the user just heard, not the empty arg
+    assert diff["replace"] == session.draft
+    events.clear()
+
+    await session.run_turn("apply it")
+
+    assert any(e["type"] == "diff_resolved" and e["applied"]
+               for e in events)
+    assert "We propose a sharper hook." in \
+        state.project.read_section("sections/intro.tex")
+
+
+@pytest.mark.anyio
+async def test_the_model_cannot_approve_its_own_fresh_diff(tmp_path):
+    # Rubber-stamp guard: the window is snapshotted at turn start, so a
+    # section_write and a pending_decide on its id in the SAME turn
+    # bounce — the user has not seen that card yet.
+    state, session, events = pending_env(tmp_path, [
+        tool_step("section_write", WRITE),
+        tool_step("pending_decide", {"diff_id": "0000", "decision": "apply"},
+                  "t2"),
+        text_step("Proposed — awaiting your approval."),
+    ])
+    await session.run_turn("tighten the intro")
+
+    assert not [e for e in events if e["type"] == "diff_resolved"]
+    assert len(session.pending_diffs) == 1
+    assert "Intro prose, tightened." not in \
+        state.project.read_section("sections/intro.tex")
+    # the bounce teaches the model why (window, not missing diff)
+    assert any(m["role"] == "tool" and "window" in m["content"]
+               for m in session.history)
+
+
+@pytest.mark.anyio
+async def test_the_captured_draft_reaches_the_tool_validators(tmp_path):
+    class CapturingLlm:
+        def __init__(self):
+            self.validators = []
+
+        async def chat(self, messages, **kwargs):
+            self.validators.append(kwargs["validators"])
+            return {"role": "assistant", "content": "ok"}, [], "ok"
+
+    state, session = make_env(tmp_path)
+    state.llm = CapturingLlm()
+    seed_gists(state)
+    args = {"section": "sections/intro.tex", "find": "Intro body prose.",
+            "replace": "", "from_draft": True}
+    await session.run_turn("add it")
+    # nothing captured yet: from_draft bounces, teaching the fenced flow
+    assert state.llm.validators[0]["section_write"](args)
+    session.draft = "We propose X."
+    await session.run_turn("add it")
+    assert state.llm.validators[1]["section_write"](args) is None
+
+
+@pytest.mark.anyio
+async def test_the_prompt_teaches_the_draft_flow(tmp_path):
+    state, session = make_env(tmp_path)
+    await session.run_turn("hello")
+    prompt = state.llm.calls[0][0]["content"]
+    assert "phd-helper" in prompt        # the identity, and rules 1-3
+    assert "from_draft" in prompt        # rule 4: apply without retyping
+    assert "```latex" in prompt          # rule 4: the draft rides the text
+    assert "pending_decide" in prompt    # rule 5: the card, voice-decided
+
+
+def test_fence_lines_never_reach_the_tts(tmp_path):
+    tts = ChunkyTts(chunks=(b"AB" * 4,) * 4)
+    llm = FakeStreamLlm([(["Here is the draft.\n\n", "```latex\n",
+                           "We propose a hook. ", "It works.\n",
+                           "```"], [])])
+    state = ws_state(tmp_path, tts=tts, llm=llm)
+    seed_gists(state)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "arm"})
+            assert ws.receive_json()["type"] == "armed"
+            ws.send_json({"type": "typed", "text": "draft a hook"})
+            frames = drain(ws, "audio_end")
+    pushed = tts.streams[0].pushed
+    assert not any("```" in p for p in pushed)
+    assert "We propose a hook." in pushed and "It works." in pushed
+    # the screen keeps the raw fenced source
+    ev = next(p for k, p in frames if k == "ev"
+              and p["type"] == "assistant_text")
+    assert "```latex" in ev["text"]
+
+
+def test_latex_is_speechified_before_the_push(tmp_path):
+    tts = ChunkyTts(chunks=(b"AB" * 4,) * 2)
+    llm = FakeStreamLlm([(["Lead with the result \\cite{vaswani2017} and "
+                           "widen. See \\ref{fig:hook} too."], [])])
+    state = ws_state(tmp_path, tts=tts, llm=llm)
+    seed_gists(state)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "arm"})
+            assert ws.receive_json()["type"] == "armed"
+            ws.send_json({"type": "typed", "text": "draft a hook"})
+            frames = drain(ws, "audio_end")
+    joined = " ".join(tts.streams[0].pushed)
+    assert "citation" in joined and "\\cite" not in joined
+    assert "reference" in joined and "\\ref{" not in joined
+    ev = next(p for k, p in frames if k == "ev"
+              and p["type"] == "assistant_text")
+    assert "\\cite{vaswani2017}" in ev["text"]  # raw rides the transcript
+
+
+def test_the_kill_switch_leg_speaks_the_same_filtered_text(tmp_path):
+    tts = ChunkyTts()
+    state = ws_state(tmp_path, tts=tts, llm=FakeStreamLlm([([DRAFT_TURN],
+                                                            [])]))
+    state.config.stream_tts = False  # ws_state turned it on for the fake
+    seed_gists(state)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "arm"})
+            assert ws.receive_json()["type"] == "armed"
+            ws.send_json({"type": "typed", "text": "draft a hook"})
+            drain(ws, "audio_end")
+    # §8: the flag changes the pump, never the wire — and never the
+    # filter either: one push, fences gone, LaTeX spoken as words
+    assert tts.streams[0].pushed == [for_speech(strip_fences(DRAFT_TURN))]
 
 
 @pytest.mark.anyio

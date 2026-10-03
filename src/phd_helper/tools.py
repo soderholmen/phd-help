@@ -105,7 +105,10 @@ TOOL_SCHEMAS = [
         "name": "section_write",
         "description": "Propose an anchored find/replace patch to a section. "
                        "The patch becomes a pending diff the user approves; "
-                       "find must be an exact quote from the section.",
+                       "find must be an exact quote from the section. To "
+                       "apply a draft the user just approved, pass "
+                       "from_draft true with replace \"\" — never retype the "
+                       "draft.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -114,8 +117,14 @@ TOOL_SCHEMAS = [
                          "description": "Exact text to replace, quoted from "
                                         "the section"},
                 "replace": {"type": "string",
-                            "description": "Replacement text"}},
-            "required": ["section", "find", "replace"],
+                            "description": "Replacement text; empty string "
+                                           "when from_draft is true"},
+                "from_draft": {"type": "boolean",
+                               "description": "true: take the replacement "
+                                              "from the user-approved "
+                                              "draft; then replace must be "
+                                              "the empty string"}},
+            "required": ["section", "find", "replace", "from_draft"],
             "additionalProperties": False}}},
     {"type": "function", "function": {
         "name": "section_create",
@@ -182,9 +191,12 @@ OFFERED = {s["function"]["name"]: {
     for s in TOOL_SCHEMAS}
 
 
-def make_validators(project: Project) -> dict:
+def make_validators(project: Project, draft: str | None = None) -> dict:
     """Per-tool validators for validate_tool_calls (SPEC §2): the patch's
-    find anchor must actually exist in the section."""
+    find anchor must actually exist in the section. ``draft`` is the
+    session's captured draft (stepwise writing): from_draft may only
+    reference a draft that exists, and the bounce text teaches the model
+    how to get one."""
     def find_exists(args):
         try:
             text = project.read_section(args["section"])
@@ -194,6 +206,17 @@ def make_validators(project: Project) -> dict:
             return (f"find anchor not present in '{args['section']}' — "
                     "read the section and quote it exactly")
         return None
+
+    def write_ok(args):
+        if args.get("from_draft"):
+            if args.get("replace"):
+                return ('from_draft and a non-empty replace are mutually '
+                        'exclusive — pass replace "" with from_draft')
+            if draft is None:
+                return ('no captured draft to apply — emit the draft in '
+                        'your reply as a fenced ```latex block and get '
+                        'the user to approve it first')
+        return find_exists(args)
 
     def not_exists(args):
         # The inverse of find_exists: a create targets a path that must
@@ -213,7 +236,7 @@ def make_validators(project: Project) -> dict:
             return (f"no pending diff '{args['diff_id']}' — check the "
                     "pending note")
         return None
-    return {"section_write": find_exists, "cite_add": find_exists,
+    return {"section_write": write_ok, "cite_add": find_exists,
             "section_create": not_exists, "pending_decide": decidable}
 
 

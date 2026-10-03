@@ -30,6 +30,8 @@ from phd_helper.gists import body_sha, flatten, render_gists, stale_sections
 from phd_helper.ingest import IngestError, Ingestor
 from phd_helper.project import Project
 from phd_helper import sessionlog
+from phd_helper.saytext import (Unfence, extract_draft, for_speech,
+                                strip_fences)
 from phd_helper.sentences import SentenceGate
 from phd_helper.server.config import REPO_ROOT, load as load_config
 from phd_helper.server.http import HttpFetcher
@@ -55,9 +57,27 @@ SYSTEM_PROMPT = (
     "emit `section_create` (after = the section to follow, empty string "
     "for the document end) — never append a new part into an existing "
     "section instead.\n"
-    "When speaking, pre-normalize math to words (say 'E equals m c "
-    "squared', not symbols) — the TTS engine hallucinates on dense symbol "
-    "strings.\n")
+    "4. Drafting new prose: if the request is specific enough to draft "
+    "now, draft now — discuss first only when the content or placement "
+    "is genuinely ambiguous. Put the draft in your reply text as one "
+    "fenced ```latex block; say at most one short line around it, and "
+    "make NO tool call in that turn. When the user approves a draft, "
+    "call `section_write` with from_draft true and replace \"\" — never "
+    "retype the draft. Small edits to text already in context may still "
+    "go straight to `section_write` with from_draft false.\n"
+    "5. While a diff is pending, the user's next words may decide it: "
+    "apply/do it → `pending_decide(diff_id, 'apply')`, discard/forget "
+    "it → `pending_decide(diff_id, 'discard')`. Never call "
+    "`pending_decide` for a diff proposed in the same turn — the user "
+    "has not seen it yet.\n"
+    "Keep spoken replies brief. When speaking, pre-normalize math to "
+    "words (say 'E equals m c squared', not symbols) — the TTS engine "
+    "hallucinates on dense symbol strings.\n")
+
+# from_draft substitution: {tool: (flag param, target param)}. Only
+# section_write today; section_create joins when a draft of a whole new
+# file earns its second validator — one line here, one in the schema.
+_DRAFT_TARGETS = {"section_write": ("from_draft", "replace")}
 
 
 class Session:
@@ -85,6 +105,11 @@ class Session:
         # pending. While any ride, the next utterance is interpreted
         # against the approval by the agent (the note in _build_context).
         self.pending_diffs: list[dict] = []
+        # Stepwise writing: the last fenced draft spoken in a reply text.
+        # The apply turn references it (from_draft) instead of re-decoding
+        # the paragraph into tool arguments; a turn without a fenced block
+        # keeps it, so interposed questions don't kill the draft.
+        self.draft: str | None = None
         # §7/§8 reopen: the live pending diffs as of the last attach,
         # reconciled (re-anchored or bounced) against disk and re-presented
         # to every socket that attaches — disk is the truth, the cards
@@ -255,6 +280,13 @@ class Session:
         # The window may have closed since the last turn (another tab's
         # button, cleanup) — the note must read disk truth, not a mirror.
         self.sync_pending()
+        # The voice may only decide cards the user has SEEN: a snapshot
+        # at turn start, so a section_write and a pending_decide on its
+        # id in the same turn bounce (the rubber-stamp guard). A
+        # legitimate voice approval always answers a previous turn's
+        # card; re-armed diffs (attach-time reconcile) land in the next
+        # turn's snapshot.
+        approval_window = {t["diff_id"] for t in self.pending_diffs}
         # The §7 rolling summaries group a sitting by the section each
         # exchange was anchored to — tag the user message with it.
         self.log({"role": "user", "content": user_text,
@@ -292,20 +324,31 @@ class Session:
                 else:
                     msg, valid_calls, text = await self.state.llm.chat(
                         msgs, tools=TOOL_SCHEMAS, offered=OFFERED,
-                        validators=make_validators(project))
+                        validators=make_validators(project, draft=self.draft))
                 if not valid_calls:
+                    draft = extract_draft(text or "")
+                    if draft:
+                        self.draft = draft  # the apply turn references it
                     self.log({"role": "assistant", "content": text or ""})
                     await self.send({"type": "assistant_text", "text": text})
                     if not self.state.config.stream_tts:
                         # kill switch: the whole reply is one push,
                         # through the SAME episode code (§8: the flag
-                        # changes the pump, never the wire)
-                        await say(text or "")
+                        # changes the pump, never the wire — and never
+                        # the speech filter either)
+                        await say(for_speech(strip_fences(text or "")))
                     if episode is not None:
                         await episode.end()
                     return
                 self.log(msg)  # assistant turn with tool_calls
                 for vc in valid_calls:
+                    # from_draft: the card, the lint and the disk all
+                    # see the draft's real bytes — the apply turn is
+                    # paperwork over words the user already heard, not
+                    # a second silent decode of the paragraph.
+                    target = _DRAFT_TARGETS.get(vc.name)
+                    if target is not None and vc.args.get(target[0]):
+                        vc.args[target[1]] = self.draft or ""
                     result = await execute_async(
                         vc, project, fetch=self.state.fetch,
                         mailto=self.state.config.crossref_mailto,
@@ -313,10 +356,10 @@ class Session:
                         corpus=self.state.corpus,
                         store=self.state.corpus_store,
                         autojoin=lambda ids: autojoin(self.state, ids),
-                        # Voice decides only inside this session's window:
-                        # the user is asked to approve what they have seen.
-                        window={t["diff_id"]
-                                for t in self.pending_diffs})
+                        # Voice decides only inside the window as of
+                        # turn start: the user is asked to approve what
+                        # they have seen (rubber-stamp guard).
+                        window=approval_window)
                     if result.get("status") == "pending":
                         # One-at-a-time diff awaiting approval (§5). The
                         # result's find/replace are the final ones (cite_add
@@ -380,24 +423,33 @@ class Session:
                 await episode.abort()  # idempotent; end() already did = no-op
 
     async def _stream_into(self, msgs, say, project):
-        """One chat_stream leg pumped through the sentence gate:
-        completed sentences are spoken as they form (the overlap that
-        kills the 13 s warm-up); a tool-call fragment or a bounce drops
-        the partial — its half-sentence goes quiet (ratified). Returns
-        the chat() triple, so the tool loop never sees the leg it rode."""
-        gate = SentenceGate()
+        """One chat_stream leg pumped through the fence filter and the
+        sentence gate: completed sentences are spoken as they form (the
+        overlap that kills the 13 s warm-up); a tool-call fragment or a
+        bounce drops the partial — its half-sentence goes quiet
+        (ratified). The voice hears fence-free, speechified prose; the
+        screen and history keep the raw text. Returns the chat() triple,
+        so the tool loop never sees the leg it rode."""
+        gate, unfence = SentenceGate(), Unfence()
         async for ev in self.state.llm.chat_stream(
                 msgs, tools=TOOL_SCHEMAS, offered=OFFERED,
-                validators=make_validators(project)):
+                validators=make_validators(project, draft=self.draft)):
             if ev[0] == "text":
-                for sentence in gate.push(ev[1]):
-                    await say(sentence)
+                # unfence before the gate (a fence line must not arm a
+                # break); for_speech after it (a command is whole only
+                # inside a completed sentence — the gate never breaks
+                # inside {…} or $…$)
+                for sentence in gate.push(unfence.push(ev[1])):
+                    await say(for_speech(sentence))
             elif ev[0] in ("toolcalls", "restart"):
                 gate.drop_tail()
+                unfence.drop_tail()
             else:  # ("done", msg, valid_calls, text)
+                for sentence in gate.push(unfence.flush()):
+                    await say(for_speech(sentence))
                 tail = gate.flush()
                 if tail:
-                    await say(tail)
+                    await say(for_speech(tail))
                 _, msg, valid_calls, text = ev
                 return msg, valid_calls, text
 

@@ -80,6 +80,43 @@ def test_section_create_validator_accepts_a_new_path(paper):
     assert v({"section": "sections/method.tex", "content": "x\n"}) is None
 
 
+# -- section_write from_draft (stepwise writing) ---------------------------
+
+
+def test_section_write_from_draft_is_a_required_boolean():
+    assert OFFERED["section_write"] == {"section": "string",
+                                        "find": "string",
+                                        "replace": "string",
+                                        "from_draft": "boolean"}
+
+
+def test_validator_accepts_from_draft_with_a_captured_draft(paper):
+    v = make_validators(paper, draft="We propose X.")["section_write"]
+    assert v({"section": "sections/intro.tex", "find": "It works well.",
+              "replace": "", "from_draft": True}) is None
+
+
+def test_validator_flags_from_draft_without_a_draft(paper):
+    v = make_validators(paper)["section_write"]  # nothing captured
+    msg = v({"section": "sections/intro.tex", "find": "It works well.",
+             "replace": "", "from_draft": True})
+    assert msg and "draft" in msg
+
+
+def test_validator_flags_from_draft_with_replace_too(paper):
+    # the XOR: a draft to apply OR text to type, never both
+    v = make_validators(paper, draft="x")["section_write"]
+    msg = v({"section": "sections/intro.tex", "find": "It works well.",
+             "replace": "typed text", "from_draft": True})
+    assert msg and "replace" in msg
+
+
+def test_validator_still_checks_the_anchor_under_from_draft(paper):
+    v = make_validators(paper, draft="x")["section_write"]
+    assert v({"section": "sections/intro.tex", "find": "not there",
+              "replace": "", "from_draft": True})
+
+
 def test_execute_section_create_returns_pending_with_created(paper):
     result = execute(call("section_create", {"section": "sections/method.tex",
                                              "content": "M.\n"}), paper)

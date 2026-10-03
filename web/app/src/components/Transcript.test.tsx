@@ -23,3 +23,26 @@ it("renders nothing without messages", () => {
   const { container } = render(<Transcript messages={[]} />);
   expect(container.querySelectorAll("li")).toHaveLength(0);
 });
+
+it("renders a fenced draft as a pre block with the fences gone", () => {
+  const { container } = render(
+    <Transcript messages={[{ id: 1, role: "assistant",
+      text: "Here you go:\n\n```latex\nWe propose a hook.\n```\nSay add." }]} />);
+  const pre = container.querySelector("li.msg.assistant pre");
+  expect(pre).toHaveTextContent("We propose a hook.");
+  expect(pre?.textContent).not.toContain("```");
+  expect(container.querySelector("li.msg.assistant"))
+    .toHaveTextContent("Here you go");
+  expect(container.querySelector("li.msg.assistant"))
+    .toHaveTextContent("Say add");
+});
+
+it("streams an unclosed draft into the pre, fence stripped", () => {
+  // the draft rides the token stream: the closing fence arrives last
+  const { container } = render(
+    <Transcript messages={[{ id: 1, role: "assistant",
+      text: "```latex\nWe propose a hook." }]} />);
+  const pre = container.querySelector("li.msg.assistant pre");
+  expect(pre).toHaveTextContent("We propose a hook.");
+  expect(pre?.textContent).not.toContain("```");
+});
