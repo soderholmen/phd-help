@@ -639,13 +639,16 @@ def test_barge_in_during_overlap_cancels_the_turn(tmp_path):
             ws.send_json({"type": "typed", "text": "hello"})
             frames = drain(ws, "audio_start")
             ws.send_json({"type": "barge_in"})
+            # audio_end is guaranteed after tts_stopped + turn_inter-
+            # rupted: abort() closes the episode it had started.
             frames += drain_until_types(ws, {"tts_stopped",
-                                             "turn_interrupted"})
+                                             "turn_interrupted",
+                                             "audio_end"})
             # (checked before shutdown: the sitting's end folds the tail)
             assert "[interrupted]" in json.dumps(state.project.chat_tail())
     types = [p["type"] for k, p in frames if k == "ev"]
     assert "tts_stopped" in types and "turn_interrupted" in types
-    assert "audio_end" not in types   # an aborted episode ends quietly
+    assert "audio_end" in types   # abort closes: "no more is coming"
 
 
 def test_barge_in_while_thinking_still_cancels(tmp_path):
@@ -809,13 +812,20 @@ def test_a_stream_fault_mid_reply_errors_inline_and_stops_the_audio(tmp_path):
     # §8: vLLM dies mid-stream. The error envelope rides where="llm"
     # exactly as the one-shot leg's does (streaming changed the leg,
     # not the failure contract), nothing half-generated ships as text,
-    # and the half-spoken episode aborts quietly — no audio_end (the
-    # reply was never delivered; the client's error path owns the stop).
+    # and the half-spoken episode still closes with audio_end: the
+    # error path sends no tts_stopped, so audio_end is the only signal
+    # that no more is coming — without it the client's barge gate stays
+    # live on silence.
     class FlakyStreamLlm(FakeStreamLlm):
         async def chat_stream(self, messages, **kwargs):
             self.calls.append([dict(m) for m in messages])
             self.stream_turns += 1
-            yield ("text", "Half a sentence. ")
+            # a COMPLETED sentence first (the trailing "Then " confirms
+            # the break): the episode opens and audio starts flowing —
+            # then the connection dies mid-stream, as a real fault
+            # would after some audio has already landed.
+            yield ("text", "Half a sentence. Then ")
+            await asyncio.sleep(0.2)   # let the forwarder open the wire
             raise LlmError("vLLM stream failed: connection reset")
 
     tts = ChunkyTts()
@@ -835,7 +845,7 @@ def test_a_stream_fault_mid_reply_errors_inline_and_stops_the_audio(tmp_path):
     err = next(p for k, p in frames if k == "ev" and p["type"] == "error")
     assert err["where"] == "llm"
     assert "assistant_text" not in types   # nothing half-made shipped
-    assert "audio_end" not in types        # aborted, not ended
+    assert "audio_end" in types            # the episode closes anyway
 
 
 def test_kill_switch_falls_back_to_one_shot_delivery(tmp_path):

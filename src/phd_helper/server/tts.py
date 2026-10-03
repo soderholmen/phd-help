@@ -47,7 +47,11 @@ class MossTtsStream:
                 await self._fail()
                 return
             # GET after start (module docstring); the reader owns the
-            # response, the socket side never sees it.
+            # response, the socket side never sees it. The GET may lose
+            # the race with the first push — safe by construction: the
+            # sidecar creates the turn's UNBOUNDED audio_queue at start
+            # and the GET generator attaches to that same queue, so
+            # audio decoded before the GET lands is already queued.
             self._reader = asyncio.create_task(self._read())
         try:
             await self._tts._push(text, is_final=False)

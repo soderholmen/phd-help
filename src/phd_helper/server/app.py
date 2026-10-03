@@ -418,9 +418,10 @@ class AudioEpisode:
     more is coming", not "you heard it all"), a dead socket a detach
     (prune) not a turn fault. The forwarder runs concurrently with
     generation — that overlap is the whole point. end() closes the
-    text and drains the audio; abort() abandons quietly and
-    idempotently (no audio_end: the client heard tts_stopped, which
-    hard-stops its player and kills its resume window)."""
+    text and drains the audio; abort() abandons idempotently — and
+    still closes the wire when audio had started: the error paths
+    (LlmError, loop budget) send no tts_stopped, and an episode left
+    open keeps the client's barge gate live on silence."""
 
     def __init__(self, session: Session):
         self._session = session
@@ -498,13 +499,17 @@ class AudioEpisode:
     async def abort(self) -> None:
         if self._ws is None or self._closed:
             return
-        self._closed = True
         if self._stream is not None:
-            # awaited aborts never suspend (cancel + sentinel, no I/O),
-            # so this stays safe inside run_turn's cancelled finally
+            # provider abort never suspends (cancel + sentinel, no I/O)
             await self._stream.abort()
         if self._forward is not None:
-            self._forward.cancel()
+            self._forward.cancel()   # stop sending before closing
+        # audio_end on every path that started audio. After a barge's
+        # tts_stopped the client is already stopped and this is just
+        # the tidy close; on the error paths it is the ONLY close the
+        # episode ever gets. A cancel landing on this send drops it —
+        # the next turn_started is the client's backstop, as today.
+        await self._end_wire()
 
     async def _end_wire(self) -> None:
         if not self._closed:

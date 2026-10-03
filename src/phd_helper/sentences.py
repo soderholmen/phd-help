@@ -86,7 +86,10 @@ class SentenceGate:
             self._last = ch
             return
         # 3. a blank line ends the current sentence, outside math/braces
-        if (ch == "\n" and self._last == "\n" and self._buf.strip()
+        # (min_chars applies here too: a stub paragraph merges forward
+        # rather than being pushed alone)
+        if (ch == "\n" and self._last == "\n"
+                and len(self._buf.strip()) >= self.min_chars
                 and not self._depth and not self._math):
             out.append(self._buf.strip())
             self._reset()

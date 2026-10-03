@@ -65,6 +65,13 @@ def test_paragraph_break_splits():
         "First para", "Second para."]
 
 
+def test_paragraph_break_respects_min_chars():
+    g = SentenceGate(min_chars=4)
+    # a stub paragraph merges forward like a stub sentence — the
+    # sidecar never speaks "ab" alone
+    assert collect(g, ["ab\n\ncd ef gh."]) == ["ab\n\ncd ef gh."]
+
+
 def test_flush_returns_tail():
     g = SentenceGate()
     assert g.push("No punctuation at the end") == []
