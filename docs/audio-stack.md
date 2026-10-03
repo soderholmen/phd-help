@@ -71,20 +71,31 @@ worked.
 | silero-vad (CPU, reference) | 0.12 s per 11.8 s |
 | MOSS-TTS server up | ~9 s |
 | MOSS-TTS TTFB | ~13 s warm (test-stack accepted; SPEC's 180 ms is not met) |
-| MOSS-TTS turn 2 | ~30 s TTFB (suspected per-shape torch.compile recompiles) |
+| MOSS-TTS turn 2 | ~30 s TTFB (suspected per-shape torch.compile recompiles — resolved 2026-10-03 below: it was the one-long-text shape, not the turn count) |
+
+## Measured on the 5070 Ti (sentence-TTS probe, 2026-10-03)
+
+| question | number |
+| --- | --- |
+| vLLM thinking-stream delta keys | `{role, content}` only — no reasoning key, content is speakable (default-on safe) |
+| sidecar TTFB, one long push | 13.4 s (the 2026-10-01 shape) |
+| sidecar TTFB, sentence pushes | **1.0 s**, identical total bytes — short pushes cost no extra recompiles |
+| backend TTF-audio, `PHD_STREAM_TTS=1` | **2.2 s**, and `audio_start` landed 0.4 s BEFORE `assistant_text` |
+| backend TTF-audio, `PHD_STREAM_TTS=0` | 5.2 s, text 2.7 s ahead (warm sidecar; the cold one-long shape is the 13.4 s row) |
+| chunk gaps while streaming | max 0.98 s over 51 chunks — over the 275 ms jitter buffer, so an occasional clean underrun pause is honest behavior, not a fault |
 
 ## Voice-out (shipped)
 
 The endpoint holder hears replies **as they are generated**: `run_turn`
 pumps the vLLM SSE stream through `SentenceGate` (`sentences.py` — the
-boundary rules bend around LaTeX: braces, `$…$`, abbrevials, decimals),
-pushes each completed sentence to the MOSS session
+boundary rules bend around LaTeX: braces, `$…$`, abbreviations,
+decimals), pushes each completed sentence to the MOSS session
 (`/tts/session/push`, `is_final=False`), and an `AudioEpisode`
 forwarder streams the PCM16 to the holder's socket between
 `audio_start{sample_rate}` and `audio_end` (view-only tabs get text
 only — audio follows the mic). Generation and synthesis overlap, so
-the first audio lands seconds into the reply instead of ~13 s after
-the whole turn. The shell's `PcmPlayer` plays it through a
+the first audio lands ~2 s into the reply (measured, above) instead of
+~13 s after the whole turn. The shell's `PcmPlayer` plays it through a
 jitter-buffered scheduling queue (`web/app/src/voice/`).
 `PHD_STREAM_TTS=0` is the kill switch: one-shot `chat()` + one push,
 through the same episode code (same wire, same semantics).
