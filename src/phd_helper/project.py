@@ -37,18 +37,24 @@ class Project:
 
     # -- reading ----------------------------------------------------------
 
-    def files(self) -> dict[str, str]:
+    def files(self, degrade: bool = False) -> dict[str, str]:
         """The project's .tex files, for callers that walk the tree and
-        the bytes together (gist staleness) without re-rglobbing."""
-        return self._files()
+        the bytes together (gist staleness) without re-rglobbing.
+        degrade=True: an unreadable file reads as absent instead of
+        failing the call — the read view shows the rest of the paper."""
+        return self._files(degrade)
 
-    def _files(self) -> dict[str, str]:
+    def _files(self, degrade: bool = False) -> dict[str, str]:
         out = {}
         for p in self.root.rglob("*.tex"):
             rel = p.relative_to(self.root)
             if rel.parts[0] == ".phd-helper":
                 continue  # state dir: history snapshots are bytes, not files
-            out[str(rel).replace("\\", "/")] = p.read_text(encoding="utf-8")
+            try:
+                out[str(rel).replace("\\", "/")] = p.read_text(encoding="utf-8")
+            except OSError:
+                if not degrade:
+                    raise
         return out
 
     def section_tree(self):

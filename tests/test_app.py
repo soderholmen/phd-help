@@ -2335,3 +2335,107 @@ def test_projects_import_guards(tmp_path):
                            content=b"junk").status_code == 400
     assert state.project.root.name == "my-paper"  # unchanged
     assert not (tmp_path / "slip").exists()  # refused zips leave nothing
+
+
+# -- read view + project download (the simple-variant slice) ----------------
+
+
+def test_document_returns_sections_in_document_order(tmp_path):
+    state = ws_state(tmp_path)
+    with TestClient(create_app(state=state)) as client:
+        doc = client.get("/document").json()
+    paths = [s["path"] for s in doc["sections"]]
+    assert paths == ["main.tex", "sections/intro.tex"]
+    assert doc["sections"][0]["blocks"][0] == {
+        "kind": "heading", "level": 0, "text": "My Paper"}
+    assert doc["sections"][1]["title"] == "Introduction"
+    assert [b["kind"] for b in doc["sections"][1]["blocks"]] == [
+        "heading", "paragraph"]
+
+
+def test_document_order_is_depth_first(tmp_path):
+    # main -> [intro, related] with intro -> i2: the nested child lands
+    # between its parent and the next sibling, as LaTeX puts it.
+    state = ws_state(tmp_path)
+    root = state.project.root
+    (root / "main.tex").write_text(
+        "\\begin{document}\n\\input{sections/intro}\n"
+        "\\input{sections/related}\n\\end{document}\n", encoding="utf-8")
+    (root / "sections" / "intro.tex").write_text(
+        "\\section{I}\n\\input{sections/i2}\n", encoding="utf-8")
+    (root / "sections" / "i2.tex").write_text(
+        "\\subsection{I2}\n", encoding="utf-8")
+    (root / "sections" / "related.tex").write_text(
+        "\\section{R}\n", encoding="utf-8")
+    with TestClient(create_app(state=state)) as client:
+        paths = [s["path"] for s in client.get("/document").json()["sections"]]
+    assert paths == ["main.tex", "sections/intro.tex", "sections/i2.tex",
+                     "sections/related.tex"]
+
+
+def test_document_degrades_around_an_unreadable_file(tmp_path):
+    # One file the door cannot read (here: a directory wearing a .tex
+    # name — read_text raises OSError) costs its own blocks, not the
+    # whole view: the rest of the paper still reads.
+    state = ws_state(tmp_path)
+    root = state.project.root
+    (root / "sections" / "broken.tex").mkdir()
+    (root / "main.tex").write_text(
+        "\\begin{document}\n\\input{sections/intro}\n"
+        "\\input{sections/broken}\n\\end{document}\n", encoding="utf-8")
+    with TestClient(create_app(state=state)) as client:
+        r = client.get("/document")
+    assert r.status_code == 200
+    by_path = {s["path"]: s for s in r.json()["sections"]}
+    assert by_path["sections/broken.tex"]["blocks"] == []
+    assert by_path["sections/intro.tex"]["blocks"] != []
+
+
+def test_projects_download_zip(tmp_path):
+    import io
+    import zipfile
+    state = ws_state(tmp_path)
+    state.projects_root = tmp_path
+    root = state.project.root
+    (root / "refs.bib").write_text("@article{a,\n title={T},\n}\n",
+                                   encoding="utf-8")
+    (root / "notes.txt").write_text("not a project file", encoding="utf-8")
+    (root / ".phd-helper").mkdir()
+    (root / ".phd-helper" / "memory.md").write_text("agent state",
+                                                    encoding="utf-8")
+    with TestClient(create_app(state=state)) as client:
+        r = client.get("/projects/download", params={"name": "my-paper"})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/zip")
+    assert r.headers["content-disposition"] == \
+        'attachment; filename="my-paper.zip"'
+    names = sorted(zipfile.ZipFile(io.BytesIO(r.content)).namelist())
+    assert names == ["main.tex", "refs.bib", "sections/intro.tex"]
+
+
+def test_projects_download_guards(tmp_path):
+    state = ws_state(tmp_path)
+    state.projects_root = tmp_path
+    with TestClient(create_app(state=state)) as client:
+        assert client.get("/projects/download",
+                          params={"name": "nope"}).status_code == 404
+        assert client.get("/projects/download",
+                          params={"name": "../out"}).status_code == 400
+        assert client.get("/projects/download",
+                          params={"name": ""}).status_code == 400
+
+
+def test_download_round_trips_through_import(tmp_path):
+    state = ws_state(tmp_path)
+    state.projects_root = tmp_path
+    (state.project.root / "refs.bib").write_text("", encoding="utf-8")
+    with TestClient(create_app(state=state)) as client:
+        blob = client.get("/projects/download",
+                          params={"name": "my-paper"}).content
+        assert client.post("/projects/import?name=copy",
+                           content=blob).status_code == 200
+    src, copy = tmp_path / "my-paper", tmp_path / "copy"
+    assert (copy / "main.tex").read_text(
+        encoding="utf-8") == (src / "main.tex").read_text(encoding="utf-8")
+    assert (copy / "sections" / "intro.tex").is_file()
+    assert (copy / "refs.bib").is_file()

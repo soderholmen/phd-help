@@ -12,6 +12,7 @@ import { fetchHealth, fetchTree } from "./api/sections";
 import { listDocs, pin, retry, unpin, uploadPdf, type UploadMeta } from "./api/corpus";
 import {
   activateProject,
+  downloadProject,
   importProject,
   listProjects,
   newProject,
@@ -23,7 +24,8 @@ import {
   uploadFile,
   type ProjectFile,
 } from "./api/files";
-import type { CorpusDoc, Health, SectionNode } from "./types";
+import { fetchDocument } from "./api/document";
+import type { CorpusDoc, DocSection, Health, SectionNode } from "./types";
 import { Header } from "./components/Header";
 import { SectionTree } from "./components/SectionTree";
 import { Transcript } from "./components/Transcript";
@@ -31,6 +33,7 @@ import { Composer } from "./components/Composer";
 import { DiffCard } from "./components/DiffCard";
 import { CorpusPanel } from "./components/CorpusPanel";
 import { FilesPanel } from "./components/FilesPanel";
+import { ReadView } from "./components/ReadView";
 
 export default function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
@@ -78,6 +81,13 @@ export default function App() {
   const [active, setActive] = useState("");
   const [files, setFiles] = useState<ProjectFile[]>([]);
   const [trash, setTrash] = useState<string[]>([]);
+  // The read view (SPEC §Section view): Talk/Read is a local view toggle
+  // — the transcript keeps living underneath. /document rides the tick
+  // only while reading, so the paper stays fresh as the agent writes.
+  const [reading, setReading] = useState(false);
+  const [doc, setDoc] = useState<DocSection[]>([]);
+  const readingRef = useRef(false);
+  readingRef.current = reading;
 
   // One 3 s poll for tree + health + corpus status + projects + files:
   // indexing is async and must be visible (§6), and the agent can
@@ -87,12 +97,13 @@ export default function App() {
   useEffect(() => {
     let stop = false;
     const tick = async () => {
-      const [t, h, d, p, f] = await Promise.allSettled([
+      const [t, h, d, p, f, doc] = await Promise.allSettled([
         fetchTree(),
         fetchHealth(),
         listDocs(),
         listProjects(),
         listFiles(),
+        readingRef.current ? fetchDocument() : Promise.resolve(null),
       ]);
       if (stop) return;
       if (t.status === "fulfilled") setTree(t.value);
@@ -107,6 +118,7 @@ export default function App() {
         setFiles(f.value.files);
         setTrash(f.value.trash);
       }
+      if (doc.status === "fulfilled" && doc.value) setDoc(doc.value.sections);
     };
     const go = () => {
       if (!document.hidden) void tick();
@@ -120,6 +132,19 @@ export default function App() {
       document.removeEventListener("visibilitychange", go);
     };
   }, []);
+
+  // Opening the read view fetches at once (the 3 s tick keeps it fresh
+  // only while open); a failure leaves the last document on screen.
+  useEffect(() => {
+    if (!reading) return;
+    let stop = false;
+    void fetchDocument()
+      .then((d) => !stop && setDoc(d.sections))
+      .catch(() => {});
+    return () => {
+      stop = true;
+    };
+  }, [reading]);
 
   // §3: capture pauses with the tab; the toggle state survives.
   useEffect(() => {
@@ -204,6 +229,8 @@ export default function App() {
     void removeFile(path).catch(notice(`Remove ${path}`));
   const onRestore = (path: string) =>
     void restoreFile(path).catch(notice(`Restore ${path}`));
+  const onDownload = (name: string) =>
+    void downloadProject(name).catch(notice(`Download ${name}`));
 
   return (
     <div className="shell">
@@ -218,6 +245,7 @@ export default function App() {
         onActivate={onActivate}
         onNew={onNew}
         onImport={onImport}
+        onDownload={onDownload}
       />
       <div className="panels">
         <aside className="left">
@@ -225,18 +253,40 @@ export default function App() {
           <SectionTree tree={tree} selected={state.selected} onSelect={(p) => conn.send(selectSection(p))} />
         </aside>
         <main className="center">
-          <Transcript messages={state.messages} />
-          {state.turnActive && <div className="thinking">thinking…</div>}
-          <ul className="diffs">
-            {state.pendingDiffs.map((c) => (
-              <DiffCard
-                key={c.diff_id}
-                card={c}
-                onApprove={(card) => conn.send(approve(card.section, card.diff_id))}
-                onReject={(card) => conn.send(reject(card.section, card.diff_id))}
-              />
-            ))}
-          </ul>
+          <div className="view-toggle">
+            <button
+              className={reading ? "" : "on"}
+              onClick={() => setReading(false)}
+              aria-pressed={!reading}
+            >
+              Talk
+            </button>
+            <button
+              className={reading ? "on" : ""}
+              onClick={() => setReading(true)}
+              aria-pressed={reading}
+            >
+              Read
+            </button>
+          </div>
+          {reading ? (
+            <ReadView sections={doc} />
+          ) : (
+            <>
+              <Transcript messages={state.messages} />
+              {state.turnActive && <div className="thinking">thinking…</div>}
+              <ul className="diffs">
+                {state.pendingDiffs.map((c) => (
+                  <DiffCard
+                    key={c.diff_id}
+                    card={c}
+                    onApprove={(card) => conn.send(approve(card.section, card.diff_id))}
+                    onReject={(card) => conn.send(reject(card.section, card.diff_id))}
+                  />
+                ))}
+              </ul>
+            </>
+          )}
           <Composer onSend={send} />
         </main>
         <aside className="right">

@@ -15,6 +15,7 @@ const noop = {
   onActivate: () => {},
   onNew: () => {},
   onImport: () => {},
+  onDownload: () => {},
 };
 
 const base = {
@@ -82,6 +83,13 @@ describe("Header", () => {
     const [name, bytes] = onImport.mock.calls[0];
     expect(name).toBe("imported");
     expect(new Uint8Array(bytes)).toEqual(new Uint8Array([7, 8]));
+  });
+
+  it("Download lists every project and hands the chosen one over", () => {
+    const onDownload = vi.fn();
+    render(<Header {...base} {...noop} onDownload={onDownload} />);
+    fireEvent.click(screen.getByRole("button", { name: "next-paper" }));
+    expect(onDownload).toHaveBeenCalledWith("next-paper");
   });
 
   it("Import cancelled at the name prompt sends nothing", async () => {

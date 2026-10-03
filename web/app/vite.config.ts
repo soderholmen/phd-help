@@ -12,7 +12,13 @@ export default defineConfig({
     proxy: {
       "/health": backend,
       "/sections": backend,
+      "/document": backend,
       "/corpus": backend,
+      // /projects and /project were missing from the dev proxy since
+      // they landed — the built shell is served by the backend itself,
+      // but dev runs against this file.
+      "/projects": backend,
+      "/project": backend,
       "/ca.pem": backend,
       "/ws": { target: backend.replace(/^http/, "ws"), ws: true },
     },

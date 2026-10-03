@@ -17,7 +17,7 @@ from datetime import date, datetime
 from pathlib import Path, PurePosixPath
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from phd_helper.cascade import ArxivRateLimited
@@ -29,6 +29,7 @@ from phd_helper.endpoint import VoiceEndpoint
 from phd_helper.gists import body_sha, flatten, render_gists, stale_sections
 from phd_helper.ingest import IngestError, Ingestor
 from phd_helper.project import Project
+from phd_helper.readable import read_document
 from phd_helper import sessionlog
 from phd_helper.saytext import (Unfence, extract_draft, for_speech,
                                 strip_fences)
@@ -1114,6 +1115,20 @@ def create_app(state: "AppState | None" = None,
                     "children": [node(c) for c in n.children]}
         return [node(n) for n in state.project.section_tree()]
 
+    @app.get("/document")
+    async def document():
+        # The read view (SPEC §Section view, simple server-side variant):
+        # the whole active paper as readable blocks in document order.
+        # The conversion is the pure readable.py kernel; this door just
+        # hands it the project's files and bib. Same posture as
+        # /sections: no params, reads the active project. files(degrade=
+        # True): one unreadable file (a torn write mid-tick) reads as
+        # absent — its blocks degrade to [] — instead of failing the
+        # whole view.
+        return {"sections": read_document(state.project.files(degrade=True),
+                                          state.project.root_file,
+                                          state.project.read_bib())}
+
     # -- file doors (issue #28): the user's own hand on the active
     # project, not the agent's — direct writes, no §5 gate (the §5
     # pending-diff path is for proposals; these are instructions).
@@ -1557,6 +1572,37 @@ def create_app(state: "AppState | None" = None,
         state.project = Project(target)
         save_last_project(root, target)
         return {"active": name}
+
+    @app.get("/projects/download")
+    async def project_download(name: str = ""):
+        # The import door run in reverse: a project's .tex/.bib files as a
+        # zip — exactly import's member allowlist, so an exported project
+        # re-imports unchanged. The .phd-helper state dir is agent state,
+        # not the paper, so it stays out.
+        root = getattr(state, "projects_root", REPO_ROOT)
+        if not _project_name_ok(name):
+            return JSONResponse({"error": f"bad project name: {name}"},
+                                status_code=400)
+        # The resolve()/is_relative_to guard mirrors /projects/activate:
+        # name is user input, and a symlink out of the projects root
+        # must not turn the door into an arbitrary-directory zip.
+        target = (root / name).resolve()
+        if not target.is_relative_to(root) or not (target / "main.tex").is_file():
+            return JSONResponse({"error": f"no such project: {name}"},
+                                status_code=404)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for p in sorted(target.rglob("*")):
+                if not p.is_file() or p.suffix.lower() not in (".tex", ".bib"):
+                    continue
+                rel = p.relative_to(target)
+                if rel.parts[0] == ".phd-helper":
+                    continue
+                z.write(p, rel.as_posix())
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+        return Response(content=buf.getvalue(), media_type="application/zip",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="{safe}.zip"'})
 
     # Private-CA root cert for devices to install (public half only; the CA
     # key never leaves certs/, which is gitignored).

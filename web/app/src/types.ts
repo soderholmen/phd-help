@@ -65,6 +65,27 @@ export interface SectionNode {
   children: SectionNode[];
 }
 
+// The read view from GET /document (readable.py blocks, SPEC §Section
+// view). The never-drop contract: math/raw blocks carry source text and
+// are shown as such — visible, never hidden.
+export type Block =
+  | { kind: "heading"; level: number; text: string }
+  | { kind: "paragraph"; text: string }
+  | { kind: "list"; ordered: boolean; items: string[] }
+  | { kind: "math"; text: string }
+  | { kind: "caption"; text: string }
+  | { kind: "raw"; text: string };
+
+export interface DocSection {
+  path: string;
+  title: string | null;
+  blocks: Block[];
+}
+
+export interface ReadDocument {
+  sections: DocSection[];
+}
+
 // A corpus doc from GET /corpus/docs.
 export interface CorpusDoc {
   doc_id: string;

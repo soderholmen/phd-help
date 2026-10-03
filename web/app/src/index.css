@@ -58,6 +58,32 @@ body { margin: 0; }
   cursor: pointer;
   font-size: 0.9rem;
 }
+.projects .download { position: relative; }
+.projects .download summary {
+  padding: 0.35rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid #888;
+  cursor: pointer;
+  font-size: 0.9rem;
+  list-style: none;
+}
+.projects .download summary::-webkit-details-marker { display: none; }
+.projects .download ul {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 10;
+  min-width: 11rem;
+  margin: 0;
+  padding: 0.3rem;
+  list-style: none;
+  display: grid;
+  gap: 0.2rem;
+  background: Canvas;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.projects .download button { width: 100%; text-align: left; }
 
 .panels {
   display: grid;
@@ -108,12 +134,53 @@ body { margin: 0; }
 
 .center {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 0.5rem;
   min-height: 0;
 }
+.view-toggle { grid-row: 1; display: flex; gap: 0.4rem; }
+.view-toggle button {
+  padding: 0.3rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid #888;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.view-toggle button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.read {
+  grid-row: 2;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 0.2rem 0.9rem;
+  max-width: 46rem;
+}
+.read p.empty { opacity: 0.7; }
+.read h1 { font-size: 1.4rem; margin: 0.9rem 0 0.4rem; }
+.read h2 { font-size: 1.15rem; margin: 1rem 0 0.3rem; }
+.read h3 { font-size: 1rem; margin: 0.9rem 0 0.3rem; }
+.read p { margin: 0.45rem 0; line-height: 1.5; }
+.read ul, .read ol { margin: 0.45rem 0; padding-left: 1.4rem; }
+.read figure {
+  margin: 0.6rem 0;
+  padding: 0.5rem 0.7rem;
+  border-left: 3px solid var(--accent);
+  background: var(--fill);
+  border-radius: 6px;
+}
+.read figcaption { font-size: 0.9rem; }
+.read pre.math, .read pre.raw {
+  margin: 0.5rem 0;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  white-space: pre-wrap;
+  font-family: monospace;
+  font-size: 0.85rem;
+}
 .transcript {
-  grid-row: 1;
+  grid-row: 2;
   list-style: none;
   margin: 0;
   padding: 0;

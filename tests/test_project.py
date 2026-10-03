@@ -37,6 +37,18 @@ def test_state_directory_files_are_not_project_files(paper):
                    for k in paper._files())
 
 
+def test_files_degrade_skips_unreadable_instead_of_failing(paper):
+    # degrade=True is the read view's posture: a file that cannot be
+    # read (here: a directory wearing a .tex name) reads as absent and
+    # the rest survives; the default keeps failing loudly for every
+    # other caller.
+    (paper.root / "sections" / "broken.tex").mkdir()
+    assert "sections/broken.tex" not in paper.files(degrade=True)
+    assert "sections/related.tex" in paper.files(degrade=True)
+    with pytest.raises(OSError):
+        paper.files()
+
+
 def test_section_tree_from_root_graph(paper):
     paths = [n.path for n in paper.section_tree()]
     assert paths == ["sections/intro.tex", "sections/related.tex"]

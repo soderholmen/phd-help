@@ -17,6 +17,7 @@ interface Props {
   onActivate: (name: string) => void;
   onNew: (name: string) => void;
   onImport: (name: string, bytes: ArrayBuffer) => void;
+  onDownload: (name: string) => void;
 }
 
 export function Header({
@@ -30,6 +31,7 @@ export function Header({
   onActivate,
   onNew,
   onImport,
+  onDownload,
 }: Props) {
   const zipRef = useRef<HTMLInputElement | null>(null);
 
@@ -94,6 +96,18 @@ export function Header({
             if (f) void pickZip(f);
           }}
         />
+        {/* Download any project without switching to it — the select
+            can't double as the picker, its onChange activates. */}
+        <details className="download">
+          <summary>Download</summary>
+          <ul>
+            {projects.map((p) => (
+              <li key={p}>
+                <button onClick={() => onDownload(p)}>{p}</button>
+              </li>
+            ))}
+          </ul>
+        </details>
       </span>
     </header>
   );
