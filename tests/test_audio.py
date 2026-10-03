@@ -438,11 +438,11 @@ def test_vad_mapping_trim_is_invisible_to_the_stream():
 
 # --- MossTts -------------------------------------------------------------
 
-def make_tts(handler, **kw):
+def make_tts(handler, session_id="phd", **kw):
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler),
                                base_url="http://tts.test")
     return MossTts("http://tts.test", "ref.mp3", http=client,
-                   session_id="phd", **kw)
+                   session_id=session_id, **kw)
 
 
 @pytest.mark.anyio
@@ -515,8 +515,10 @@ async def test_moss_tts_stream_reuses_the_session_across_turns():
 
 @pytest.mark.anyio
 async def test_moss_tts_stream_abort_closes_without_final_and_next_start_works():
-    # No abort endpoint exists — the abandoned turn auto-finishes on the
-    # next start (new_turn=True); the client's job is to stop reading.
+    # No cancel endpoint exists, so abort closes the session outright:
+    # the single-threaded worker stops the abandoned turn instead of
+    # synthesizing it (and force-finishing into garbage) before the next
+    # turn's audio. The client's job is to stop reading AND stop paying.
     seen = []
 
     def handler(request):
@@ -534,12 +536,48 @@ async def test_moss_tts_stream_abort_closes_without_final_and_next_start_works()
     assert got in ([], [b"zz"])          # partial or none, both honest
     finals = [b for p, b in seen
               if p == "/tts/session/push" and b.get("is_final")]
-    assert finals == []
+    assert finals == []                  # abandoned, never force-finished
+    assert "/tts/session/close" in [p for p, _ in seen]  # worker stopped
     s2 = tts.stream()
     await s2.push("fresh")
     await s2.finish()
     assert [c async for c in s2.chunks()] == [b"zz"]
     assert [p for p, _ in seen].count("/tts/session/start") == 2
+
+
+@pytest.mark.anyio
+async def test_moss_tts_abort_before_open_touches_no_network():
+    # A stream that never opened a session has nothing to close — abort
+    # must not invent a close POST for a session that was never started.
+    calls = []
+    tts = make_tts(lambda r: calls.append(r) or httpx.Response(200))
+    s = tts.stream()
+    await s.push("   ")                  # whitespace: never opens
+    await s.abort()
+    assert calls == []
+
+
+@pytest.mark.anyio
+async def test_moss_tts_session_id_is_unique_per_instance():
+    # A fixed id would make a second MossTts (a probe, a restart, a
+    # second backend) share the sidecar's one worker session and audio
+    # queue — turns interleave into each other's audio. Each instance
+    # owns its own id; reuse is per-instance, across its own turns.
+    starts = []
+
+    def handler(request):
+        if request.url.path == "/tts/session/start":
+            starts.append(json.loads(request.content)["session_id"])
+        if request.url.path.endswith("/audio"):
+            return httpx.Response(200, content=b"z")
+        return httpx.Response(200, json={})
+
+    for _ in range(2):
+        s = make_tts(handler, session_id=None).stream()
+        await s.push("hello")
+        await s.finish()
+        [c async for c in s.chunks()]
+    assert starts[0] and starts[0] != starts[1]
 
 
 @pytest.mark.anyio

@@ -7,9 +7,14 @@ audio stream ends on the sidecar's sentinel. The GET must be issued
 AFTER the start POST returns — the generator captures the turn's queue
 at generator start, so an early GET would attach to the previous
 turn's queue and hang. Every turn re-POSTs start with the same
-session_id — the server caches the prompt tokens, which is what makes
-turn 2 cheap. There is no abort endpoint: an abandoned turn
-auto-finishes on the next start (new_turn=True).
+session_id, which keeps the session's worker alive (the model itself is
+cached process-wide, and the prompt is re-encoded every turn regardless
+— fast_api.py re-encodes it in _handle_start_turn). There is no cancel
+endpoint, so abort() closes the session outright: the worker is
+single-threaded, so an abandoned turn would otherwise keep synthesizing
+behind the next turn's start on the same queue (and force-finish into a
+garbled tail) — deleting the session gives the next turn a fresh worker
+and skips the force-finish entirely.
 
 Failure policy (§8): TTS down means screen-only replies, so a failed
 stream ends the chunk iterator quietly and three consecutive failed
@@ -17,6 +22,7 @@ streams flip faulted(); a clean stream resets the counter.
 """
 
 import asyncio
+from uuid import uuid4
 
 import httpx
 
@@ -87,9 +93,20 @@ class MossTtsStream:
             await self._fail()
 
     async def abort(self) -> None:
+        if self._ended:
+            return
         if self._reader is not None:
-            self._reader.cancel()       # stop reading; the sidecar turn
-        self._end()                     # auto-finishes on the next start
+            self._reader.cancel()       # stop reading
+        self._end()                     # chunks end before any I/O: a
+                                        # cancel landing on the close below
+                                        # must not strand the stream
+        if self._opened:
+            # Stop the sidecar, not just the read: the worker is
+            # single-threaded, so an abandoned turn keeps synthesizing
+            # (and force-finishes into garbage on the next start) until
+            # it is closed out of. Best effort — a dead sidecar must
+            # never hold the barge.
+            await self._tts._close_session()
 
     async def chunks(self):
         while True:
@@ -113,13 +130,20 @@ class MossTtsStream:
 class MossTts:
     def __init__(self, url: str, prompt_wav: str,
                  http: httpx.AsyncClient | None = None,
-                 session_id: str = "phd-backend", timeout_s: float = 180.0,
+                 session_id: str | None = None, timeout_s: float = 180.0,
                  fault_threshold: int = 3):
         self._http = http or httpx.AsyncClient(base_url=url,
                                                timeout=timeout_s)
         self._owns_http = http is None
         self._prompt_wav = prompt_wav
-        self._session_id = session_id
+        # One session per instance, not one per process: a fixed id makes
+        # every MossTts (a second backend, a restart, a diagnostic probe)
+        # share the sidecar's single worker session and audio queue, so
+        # their turns interleave into each other's audio. Reused across
+        # THIS instance's turns, which keeps its worker (and the
+        # process-wide cached model) warm — not the prompt, which the
+        # sidecar re-encodes every turn anyway.
+        self._session_id = session_id or uuid4().hex
         self._failures = 0
         self._fault_threshold = fault_threshold
         # The rate the sidecar actually produces (its TARGET_SR); the
@@ -162,12 +186,17 @@ class MossTts:
         except httpx.HTTPError:
             return False
 
-    async def aclose(self) -> None:
-        try:                            # best effort — the sidecar may be gone
+    async def _close_session(self) -> None:
+        # Best effort — the sidecar may be gone, and a hung one must
+        # never hold a barge (or lifespan shutdown) for the full 180 s.
+        try:
             await self._http.post("/tts/session/close",
                                   json={"session_id": self._session_id},
-                                  timeout=5.0)  # never let a hung sidecar
-        except httpx.HTTPError:         # hold lifespan shutdown for 180 s
+                                  timeout=5.0)
+        except httpx.HTTPError:
             pass
+
+    async def aclose(self) -> None:
+        await self._close_session()
         if self._owns_http:
             await self._http.aclose()

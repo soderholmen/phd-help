@@ -125,7 +125,12 @@ filter one-shot (`strip_fences`).
 Barge-in: 200 ms of sustained AEC'd mic while playing pauses the
 playhead instantly and sends the control; while the agent is still
 composing the server **cancels the turn** and fans out `tts_stopped`,
-which hard-stops every player and kills its resume window. Once the
+which hard-stops every player and kills its resume window. The
+cancelled turn's sidecar session is closed too (`abort()` → `/close`):
+the worker is single-threaded, so an abandoned turn would otherwise
+keep synthesizing its queued sentences — and force-finish into a
+garbled tail — ahead of the next turn on the same queue; deleting the
+session hands the next turn a fresh worker. Once the
 reply is fully composed — audio draining, or the turn already done —
 there is nothing to un-ring: the control is a no-op and the client's
 2.5 s resume window governs the buffered audio (SPEC §3).

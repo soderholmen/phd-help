@@ -557,7 +557,8 @@ class AudioEpisode:
         if self._ws is None or self._closed:
             return
         if self._stream is not None:
-            # provider abort never suspends (cancel + sentinel, no I/O)
+            # provider abort closes the sidecar session (best-effort, 5 s
+            # cap) so the abandoned turn stops generating, then sentinel
             await self._stream.abort()
         if self._forward is not None:
             self._forward.cancel()   # stop sending before closing
