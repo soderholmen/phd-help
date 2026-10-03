@@ -1613,6 +1613,22 @@ async def test_a_fenced_draft_is_captured_and_survives_plain_turns(tmp_path):
 
 
 @pytest.mark.anyio
+async def test_an_empty_fence_clears_the_draft_rather_than_keeping_it_stale(
+        tmp_path):
+    # a complete block REPLACES the draft — even when it is empty. The
+    # user heard no new draft, so the old one must not survive to be
+    # applied by a later "add it".
+    state, session, events = pending_env(tmp_path, [
+        text_step(DRAFT_TURN),
+        text_step("Scratch that:\n\n```latex\n```\nNothing yet."),
+    ])
+    await session.run_turn("add a hook to the intro")
+    assert session.draft
+    await session.run_turn("actually, retract it")
+    assert session.draft is None
+
+
+@pytest.mark.anyio
 async def test_the_apply_turn_substitutes_the_draft_into_the_card(tmp_path):
     state, session, events = pending_env(tmp_path, [
         text_step(DRAFT_TURN),

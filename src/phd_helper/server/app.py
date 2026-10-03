@@ -327,8 +327,13 @@ class Session:
                         validators=make_validators(project, draft=self.draft))
                 if not valid_calls:
                     draft = extract_draft(text or "")
-                    if draft:
-                        self.draft = draft  # the apply turn references it
+                    if draft is not None:
+                        # a complete block REPLACES, even empty: the user
+                        # heard no new draft, so the old one must not
+                        # survive to be applied by a later "add it"
+                        # ("" normalizes to None — the validator's
+                        # no-draft check is `is None`)
+                        self.draft = draft or None
                     self.log({"role": "assistant", "content": text or ""})
                     await self.send({"type": "assistant_text", "text": text})
                     if not self.state.config.stream_tts:
