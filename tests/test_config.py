@@ -74,6 +74,19 @@ def test_corpus_url_reads_env_at_construction(monkeypatch):
     assert Config().corpus_url == "http://127.0.0.1:9991"
 
 
+def test_vad_engine_defaults_to_silero():
+    assert Config().vad_engine == "silero"
+
+
+def test_typo_vad_engine_fails_fast():
+    # A typo'd endpointing engine must not silently run the energy gate
+    # the user just complained about (§8: state is known at startup;
+    # explicit-value call like the stack tests — the string switch reads
+    # the env in the class body, same as corpus_stack).
+    with pytest.raises(ValueError, match="PHD_VAD"):
+        Config(vad_engine="sileroo")
+
+
 def test_stream_tts_defaults_on(monkeypatch):
     monkeypatch.delenv("PHD_STREAM_TTS", raising=False)
     assert Config().stream_tts is True

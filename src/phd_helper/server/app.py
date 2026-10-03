@@ -653,7 +653,8 @@ class AppState:
                 self.config.stt_url,
                 vad=EnergyVad(threshold=self.config.vad_threshold),
                 hangover_s=self.config.conversation_hangover_s,
-                min_utterance_s=self.config.min_utterance_s)
+                min_utterance_s=self.config.min_utterance_s,
+                vad_mode=self.config.vad_engine)
             self.tts = MossTts(self.config.tts_url,
                                self.config.tts_prompt_wav)
         # PDF fetch is arXiv-spaced too (§6 politeness covers all arXiv

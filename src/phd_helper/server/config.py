@@ -125,6 +125,12 @@ class Config:
             str(REPO_ROOT / ".probe" / "MOSS-TTS" / "assets" / "audio"
                 / "reference_en_0.mp3")))
     vad_threshold: float = field(default_factory=_vad_threshold)
+    # Endpointing engine (docs/audio-stack.md): "silero" asks the ASR
+    # sidecar's VAD per mic blob — the energy gate cut real speech at
+    # micro-pauses (the live listen-test heard "Yeah." where a sentence
+    # was said); "energy" is the kill switch back to the pure gate.
+    # EnergyVad stays the per-frame fallback under silero either way.
+    vad_engine: str = os.environ.get("PHD_VAD", "silero")
     # Sentence-level TTS off the token stream (docs/audio-stack.md). The
     # kill switch exists because vLLM SSE × thinking mode × tool-call
     # fragmentation is live-risk and only partially unit-testable: "0"
@@ -140,6 +146,10 @@ class Config:
             if value not in ("off", "local"):
                 raise ValueError(
                     f"{name} must be 'off' or 'local', got {value!r}")
+        if self.vad_engine not in ("silero", "energy"):
+            raise ValueError(
+                f"PHD_VAD must be 'silero' or 'energy', "
+                f"got {self.vad_engine!r}")
 
     def sampling(self, thinking: bool) -> dict:
         return THINKING_SAMPLING if thinking else PLAIN_SAMPLING

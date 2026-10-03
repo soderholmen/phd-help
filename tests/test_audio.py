@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from phd_helper.segmenting import FRAME_BYTES, EnergyVad, UtteranceGate
-from phd_helper.server.stt import SidecarStt
+from phd_helper.server.stt import RemoteVad, SidecarStt
 from phd_helper.server.tts import MossTts
 
 FRAME_SAMPLES = FRAME_BYTES // 2  # 16 kHz mono PCM16, 30 ms
@@ -207,6 +207,233 @@ async def test_sidecar_stt_healthy_probes_the_sidecar():
     down = make_stt(lambda r: (_ for _ in ()).throw(
         httpx.ConnectError("nope", request=r)))
     assert not await down.healthy()
+
+
+# --- RemoteVad + the silero leg ------------------------------------------
+#
+# The energy gate cuts real speech at micro-pauses (the live listen-test
+# heard "Yeah." where a sentence was said — docs/audio-stack.md). The
+# silero leg asks the sidecar per mic blob and consumes its verdicts one
+# per gate frame; EnergyVad stays the per-frame fallback, so a /vad fault
+# degrades endpointing quality without ever dropping the utterance.
+
+def test_remote_vad_pops_scripted_verdicts_then_falls_back_to_energy():
+    rv = RemoteVad(EnergyVad())
+    rv.extend([True, False])
+    assert rv.speech(SILENCE) is True       # the verdict wins over the bytes
+    assert rv.speech(SILENCE) is False
+    assert rv.speech(LOUD)                  # starved: energy answers
+    assert not rv.speech(SILENCE)
+
+
+def make_silero_stt(vad_handler, transcribe_handler, **kw):
+    def handler(request):
+        return (vad_handler(request) if request.url.path == "/vad"
+                else transcribe_handler(request))
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler),
+                               base_url="http://stt.test")
+    return SidecarStt("http://stt.test", http=client, vad_mode="silero",
+                      hangover_s=0.6, min_utterance_s=0.1, **kw)
+
+
+@pytest.mark.anyio
+async def test_silero_leg_verdicts_drive_the_gate_to_a_final():
+    seen = []
+
+    def vad(request):
+        seen.append(request)
+        return httpx.Response(200, json={"speech": [True] * 10 + [False] * 20})
+
+    stt = make_silero_stt(
+        vad, lambda r: httpx.Response(200, json={"text": "whole sentence"}))
+    assert await stt.feed(UTTERANCE) == ["whole sentence"]
+    assert seen[0].url.params["stream"]          # per-session stream identity
+    assert seen[0].url.params["off"] == "0"
+
+
+@pytest.mark.anyio
+async def test_silero_leg_carries_stream_and_offset_across_blobs():
+    # The offset is the sidecar's frame-grid anchor: it lets a stream
+    # resync after a lost POST instead of misaligning forever.
+    offs = []
+
+    def vad(request):
+        off = int(request.url.params["off"])
+        offs.append((request.url.params["stream"], off))
+        speech = [True] * 5 if off else [True] * 5 + [False] * 20
+        return httpx.Response(200, json={"speech": speech})
+
+    stt = make_silero_stt(
+        vad, lambda r: httpx.Response(200, json={"text": "x"}))
+    assert await stt.feed(LOUD * 5) == []
+    assert await stt.feed(LOUD * 5 + SILENCE * 20) == ["x"]
+    assert offs[0][0] == offs[1][0]              # one stream per session
+    assert [o for _, o in offs] == [0, 5 * FRAME_BYTES]
+
+
+@pytest.mark.anyio
+async def test_silero_leg_asks_the_sidecar_even_for_silence():
+    calls = []
+
+    def vad(request):
+        calls.append(request)
+        return httpx.Response(200, json={"speech": [False] * 10})
+
+    stt = make_silero_stt(
+        vad, lambda r: httpx.Response(200, json={"text": "x"}))
+    assert await stt.feed(SILENCE * 10) == []
+    assert len(calls) == 1        # the bytes go where the verdicts come from
+
+
+@pytest.mark.anyio
+async def test_silero_leg_vad_fault_falls_back_to_energy_and_still_delivers():
+    def vad(request):
+        raise httpx.ConnectError("vad leg down", request=request)
+
+    stt = make_silero_stt(
+        vad, lambda r: httpx.Response(200, json={"text": "x"}))
+    assert await stt.feed(UTTERANCE) == ["x"]   # energy heard the LOUD frames
+    assert not stt.faulted()                     # one failure is not a fault
+
+
+@pytest.mark.anyio
+async def test_silero_leg_vad_failures_reach_health_while_transcribe_works():
+    # Degraded endpointing is visible: /transcribe being fine does not
+    # mask /vad being down — the vad leg keeps its own failure count.
+    def vad(request):
+        return httpx.Response(500)
+
+    stt = make_silero_stt(
+        vad, lambda r: httpx.Response(200, json={"text": "x"}))
+    for _ in range(3):
+        assert await stt.feed(UTTERANCE) == ["x"]   # degraded, still working
+    assert stt.faulted()                             # /health says so honestly
+
+
+@pytest.mark.anyio
+async def test_silero_leg_realigns_verdicts_after_an_utterance_close():
+    # The gate stops consulting the VAD the frame it closes, so blob 1
+    # leaves 5 unconsumed verdicts (frames after the close). Drained at
+    # pop, blob 2's speech is judged speech from its first frame; left,
+    # every later frame is misanswered by the stale verdicts forever.
+    def vad(request):
+        off = int(request.url.params["off"])
+        if off == 0:
+            speech = [True] * 5 + [False] * 25      # closes at frame 24
+        elif off == 30 * FRAME_BYTES:
+            speech = [True] * 10                    # blob 2: all speech
+        else:
+            speech = [False] * 20                   # blob 3: the hangover
+        return httpx.Response(200, json={"speech": speech})
+
+    heard = []
+
+    def transcribe(request):
+        heard.append(len(request.content))
+        return httpx.Response(200, json={"text": "x"})
+
+    stt = make_silero_stt(vad, transcribe)
+    assert await stt.feed(LOUD * 30) == ["x"]
+    assert await stt.feed(LOUD * 10) == []
+    assert await stt.feed(SILENCE * 20) == ["x"]
+    # utterance 1: 5 speech + 20 tail; utterance 2: blob 2's 10 speech
+    # (none swallowed) + blob 3's 20 tail
+    assert heard == [25 * FRAME_BYTES, 30 * FRAME_BYTES]
+
+
+@pytest.mark.anyio
+async def test_silero_leg_posts_only_whole_frames():
+    # A whole-frame offset is what makes a resync lossless: the sidecar
+    # can never skip a frame the gate will still process. The sub-frame
+    # tail is held and rides the next POST.
+    seen = []
+
+    def vad(request):
+        seen.append((request.url.params["off"], len(request.content)))
+        n = len(request.content) // FRAME_BYTES
+        return httpx.Response(200, json={"speech": [False] * n})
+
+    stt = make_silero_stt(vad, lambda r: httpx.Response(200,
+                                                       json={"text": "x"}))
+    await stt.feed(SILENCE * 3 + b"\x00\x01" * 100)     # 3 frames + 200 B
+    await stt.feed(SILENCE * 2)
+    assert seen == [("0", 3 * FRAME_BYTES),
+                    (str(3 * FRAME_BYTES), 2 * FRAME_BYTES)]
+
+
+def test_sidecar_stt_rejects_an_unknown_vad_mode():
+    # The config guard catches typos at startup; this is the adapter's
+    # own second line — a mode that is neither leg must fail loudly,
+    # never silently run the gate the user just complained about.
+    with pytest.raises(ValueError, match="vad_mode"):
+        SidecarStt("http://stt.test", vad_mode="silro")
+
+
+# --- sidecar /vad mapping --------------------------------------------------
+#
+# The mapping (global frame grid, offset resync, buffer trim, chunk/frame
+# overlap) is pure Python by design — torch lives behind load_vad — so the
+# trickiest logic in the slice is unit-tested with a fake model. The real
+# silero is proven by scripts/smoke_audio.py.
+
+def load_asr_script():
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / "scripts" / "asr_server.py"
+    spec = importlib.util.spec_from_file_location("asr_server", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod._vad_streams.clear()
+    return mod
+
+
+def pcm(amplitude: int, samples: int) -> bytes:
+    return struct.pack(f"<{samples}h", *((amplitude,) * samples))
+
+
+def test_vad_mapping_emits_one_verdict_per_global_frame():
+    mod = load_asr_script()
+    mod.load_vad = lambda: (lambda chunk: 0.9 if chunk[0] else 0.0)
+    blob = pcm(10000, 1600)                       # a 100 ms mic blob
+    assert mod._vad_verdicts("s", 0, blob) == [True] * 3    # 1600 // 480
+    assert mod._vad_verdicts("s", len(blob), blob) == [True] * 3
+    # the partial frame carried across the POST — no drift, no duplicates
+
+
+def test_vad_mapping_resyncs_on_offset_mismatch():
+    mod = load_asr_script()
+    mod.load_vad = lambda: (lambda chunk: 0.9 if chunk[0] else 0.0)
+    blob = pcm(10000, 1600)
+    mod._vad_verdicts("s", 0, blob)
+    # a lost POST: the next off skips ahead. Fresh state, no crash, and
+    # verdicts resume on the global grid — the skipped frames are simply
+    # absent (the backend's energy fallback answers them).
+    v = mod._vad_verdicts("s", 2 * len(blob), blob)
+    assert v == [True] * 3       # resync at sample 3200: frames 7, 8, 9
+
+
+def test_vad_mapping_frame_is_speech_if_any_overlapping_chunk_is():
+    mod = load_asr_script()
+    mod.load_vad = lambda: (lambda chunk: 0.9 if any(chunk) else 0.0)
+    samples = [0] * 1440
+    for i in range(400, 512):
+        samples[i] = 9000        # loud inside silero chunk 0 only
+    body = struct.pack("<1440h", *samples)
+    # conservative overlap: chunk 0 touches frames 0 AND 1 — both speech;
+    # frame 2 sees only the silent chunk 1
+    assert mod._vad_verdicts("s", 0, body) == [True, True, False]
+
+
+def test_vad_mapping_trim_is_invisible_to_the_stream():
+    mod = load_asr_script()
+    mod.load_vad = lambda: (lambda chunk: 0.9 if any(chunk) else 0.0)
+    data = (pcm(9000, 480) + pcm(0, 480)) * 8
+    streamed = []
+    blob = 3200
+    for off in range(0, len(data), blob):
+        streamed += mod._vad_verdicts("t", off, data[off:off + blob])
+    single = mod._vad_verdicts("u", 0, data)      # fresh stream, one POST
+    assert streamed == single
+    assert len(single) == 16                      # 7680 samples, 16 frames
 
 
 # --- MossTts -------------------------------------------------------------

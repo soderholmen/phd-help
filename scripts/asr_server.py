@@ -1,19 +1,22 @@
-"""parakeet STT sidecar (docs/audio-stack.md).
+"""parakeet STT + silero VAD sidecar (docs/audio-stack.md).
 
-Standalone on purpose: it runs in .venv-asr (py3.12 + NeMo + torch), which
-does not have phd_helper installed — and must never import it, so the
-backend venv (where Smart App Control blocks torch) can never be tempted
-to load a model in-process. Pinned by a grep test in tests/test_audio.py.
+Standalone on purpose: it runs in .venv-asr (py3.12 + NeMo + torch +
+silero-vad), which does not have phd_helper installed — and must never
+import it, so the backend venv (where Smart App Control blocks torch) can
+never be tempted to load a model in-process. Pinned by an AST test in
+tests/test_audio.py.
 
 Run:  .venv-asr/Scripts/python.exe scripts/asr_server.py --port 8090
 """
 
 import argparse
+import array
 import asyncio
 import os
 import tempfile
 import threading
 import wave
+from collections import OrderedDict
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -94,6 +97,118 @@ async def transcribe(request: Request):
     # the event loop would stall this sidecar's own /health — a merely
     # busy sidecar must not read faulted to the backend.
     return {"text": await asyncio.to_thread(_transcribe_wav, body)}
+
+
+# --- /vad: silero endpointing verdicts ------------------------------------
+#
+# The backend owns the endpointing state machine (segmenting.py); this leg
+# only answers "is this 30 ms frame speech" from silero-vad on CPU (no
+# VRAM — it coexists with parakeet and MOSS by design). The frame grid is
+# GLOBAL to a stream: the backend sends the byte offset it has fed, and a
+# mismatch (a lost POST) resyncs the stream — fresh model state, the
+# un-startable frame skipped — so a fault costs that blob's verdicts (the
+# backend's energy fallback answers them), never a permanent misalignment.
+# A frame is speech if ANY overlapping silero chunk cleared the threshold:
+# conservative on purpose — longer speech regions mean fewer mid-utterance
+# cuts, which is the whole reason silero replaced the energy gate. A chunk
+# still straddling the POST's end is not scored yet, so a frame's verdict
+# can miss at most that one chunk: a <=1-frame (30 ms) edge effect per
+# POST, at a speech-region boundary the 0.6 s hangover absorbs anyway.
+
+VAD_FRAME_SAMPLES = 480        # 30 ms at 16 kHz — segmenting.py's grid,
+                               # duplicated on purpose: scripts must never
+                               # import phd_helper (the AST pin)
+VAD_CHUNK_SAMPLES = 512        # silero v6's fixed chunk size at 16 kHz
+# Silero's probability floor — deliberately NOT PHD_VAD_THRESHOLD, which
+# is the backend's energy-RMS floor (config.py): one knob, one name.
+VAD_THRESHOLD = float(os.environ.get("PHD_SILERO_THRESHOLD", "0.5"))
+VAD_STREAMS_MAX = 8            # LRU; endpoint handoffs must not leak
+
+_vad_lock = threading.Lock()   # one CPU model: one verdict call at a time
+_vad_streams: "OrderedDict[str, dict]" = OrderedDict()
+
+
+def load_vad():
+    # torch lives only here: the mapping below stays pure Python, so the
+    # backend's test venv (no torch, by SAC) can still unit-test the
+    # offset/resync/trim grid with an injected fake model.
+    import torch
+    from silero_vad import load_silero_vad
+    model = load_silero_vad()
+
+    def call(chunk):                     # array('h') of 512 int16 -> prob
+        t = torch.tensor(list(chunk), dtype=torch.float32) / 32768.0
+        with torch.no_grad():
+            return float(model(t.reshape(1, -1), 16000))
+    return call
+
+
+def _vad_verdicts(stream: str, off: int, body: bytes) -> list:
+    st = _vad_streams.get(stream)
+    if st is None or st["end"] != off:
+        # new stream, or resync after a lost POST: a fresh model instance
+        # (silero's RNN state must not straddle the gap), and the first
+        # frame whose start we missed is skipped — the backend's energy
+        # fallback answers exactly that one frame.
+        st = {"pos": off, "end": off, "buf": b"", "model": load_vad(),
+              "probs": [], "fed": 0}
+        st["next_frame"] = -(-off // 2 // VAD_FRAME_SAMPLES)   # ceil
+        _vad_streams[stream] = st
+        while len(_vad_streams) > VAD_STREAMS_MAX:
+            _vad_streams.popitem(last=False)
+    else:
+        _vad_streams.move_to_end(stream)
+
+    st["buf"] += body
+    st["end"] += len(body)
+    gstart = st["pos"] // 2                       # global sample position
+    n_avail = len(st["buf"]) // 2
+
+    # run silero over the newly available 512-sample chunks (grid anchored
+    # at the stream's resync point; the model's state carries across)
+    fed = st["fed"]
+    while n_avail - fed >= VAD_CHUNK_SAMPLES:
+        chunk = array.array("h")
+        chunk.frombytes(st["buf"][fed * 2:(fed + VAD_CHUNK_SAMPLES) * 2])
+        st["probs"].append((gstart + fed, gstart + fed + VAD_CHUNK_SAMPLES,
+                            st["model"](chunk) > VAD_THRESHOLD))
+        fed += VAD_CHUNK_SAMPLES
+    st["fed"] = fed
+
+    # verdicts for every global frame this POST completes
+    out = []
+    k = st["next_frame"]
+    while (k + 1) * VAD_FRAME_SAMPLES <= gstart + n_avail:
+        fs, fe = k * VAD_FRAME_SAMPLES, (k + 1) * VAD_FRAME_SAMPLES
+        out.append(any(p for cs, ce, p in st["probs"]
+                       if cs < fe and ce > fs and p))
+        st["probs"] = [(cs, ce, p) for cs, ce, p in st["probs"] if ce > fe]
+        k += 1
+    st["next_frame"] = k
+
+    # trim consumed bytes: nothing before the earlier of (model-fed,
+    # next frame's start) is ever looked at again
+    keep_from = min(gstart + fed, k * VAD_FRAME_SAMPLES)
+    if keep_from > gstart:
+        st["buf"] = st["buf"][(keep_from - gstart) * 2:]
+        st["pos"] = keep_from * 2
+        st["fed"] = fed - (keep_from - gstart)
+    return out
+
+
+@app.post("/vad")
+async def vad(request: Request, stream: str = "default", off: int = 0):
+    """Raw 16 kHz mono PCM16 in, {"speech": [bool per 30 ms frame]} out."""
+    body = await request.body()
+    if not body:
+        return {"speech": []}
+    # to_thread like /transcribe: the first silero load must not stall the
+    # event loop (and /health) — and the lock above must never be held on
+    # it.
+    def run():
+        with _vad_lock:
+            return _vad_verdicts(stream, off, body)
+    return {"speech": await asyncio.to_thread(run)}
 
 
 if __name__ == "__main__":

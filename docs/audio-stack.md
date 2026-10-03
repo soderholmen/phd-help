@@ -12,10 +12,17 @@ degrades per §8 (typed chat and screen-only replies keep working).
 Two honest deviations from SPEC §3, both contained behind the Protocols
 in `server/voice.py`:
 
-- **Endpointing is an energy gate, not silero** (`segmenting.py`, pure
-  Python, fully tested). `UtteranceGate` takes any `speech(frame)->bool`,
-  so a sidecar-hosted silero can replace `EnergyVad` without touching the
-  state machine.
+- **Endpointing: silero verdicts over HTTP, not in-process** (SPEC
+  wanted silero in the backend; torch can't load there). The ASR
+  sidecar answers `POST /vad` per mic blob — one verdict per 30 ms
+  frame, silero on CPU, no VRAM — and `RemoteVad` (`server/stt.py`)
+  feeds the verdicts to the same `UtteranceGate` (`segmenting.py`, pure
+  Python, fully tested). `EnergyVad` stays the per-frame fallback: a
+  `/vad` fault degrades endpointing quality, never drops an utterance.
+  The shipped energy gate had cut real speech at micro-pauses (the live
+  listen-test heard "Yeah." where a sentence was said); with silero the
+  0.6 s hangover finally means a real pause. `PHD_VAD=energy` is the
+  kill switch back to the pure gate.
 - **No live partials yet.** NeMo 3.0 dropped the stateful per-chunk
   streaming API the nemotron partials needed.
 
@@ -23,7 +30,7 @@ in `server/voice.py`:
 
 ```powershell
 # ASR sidecar deps (the venv already has NeMo 3.0 + torch cu128)
-.venv-asr/Scripts/pip.exe install fastapi uvicorn
+.venv-asr/Scripts/pip.exe install fastapi uvicorn silero-vad
 
 # TTS sidecar: vendored clone + weights (already done on this box)
 git clone https://github.com/OpenMOSS/MOSS-TTS .probe/MOSS-TTS
@@ -58,9 +65,13 @@ as sidecar 500 → `faulted`, never as a silent lie.
 .venv/Scripts/python.exe scripts/smoke_audio.py
 ```
 
-Writes `.probe/smoke_tts_out.wav` (listen) and prints the parakeet
-transcript of `.probe/probe_speech_16k.wav`. Exit 0 only if both legs
-worked.
+Writes `.probe/smoke_tts_out.wav` (listen), prints the parakeet
+transcript of `.probe/probe_speech_16k.wav`, and streams the same file
+through `/vad` the way the mic does. The file is two concatenated
+sentences, so the property the energy gate failed must hold: exactly
+ONE hangover-length (0.6 s) silence cut inside the speech — the real
+inter-sentence pause. The energy gate produced two, the second
+mid-sentence (the "Yeah." shape). Exit 0 only if all three legs worked.
 
 ## Measured on the 5070 Ti (probe, 2026-10-01)
 
@@ -69,6 +80,7 @@ worked.
 | parakeet-tdt-0.6b-v3 final | 0.46 s for 11.8 s of audio (26× realtime) |
 | parakeet load | 7.4 s, 5.1 GB fp32 / ~2.5 GB bf16 |
 | silero-vad (CPU, reference) | 0.12 s per 11.8 s |
+| silero `/vad` shipped (HTTP, 392 frames) | 1.19 s per 11.8 s audio; 1 cut (the real pause) vs energy's 2 (one mid-sentence), speech fraction 0.81 vs 0.36 |
 | MOSS-TTS server up | ~9 s |
 | MOSS-TTS TTFB | ~13 s warm (test-stack accepted; SPEC's 180 ms is not met) |
 | MOSS-TTS turn 2 | ~30 s TTFB (suspected per-shape torch.compile recompiles — resolved 2026-10-03 below: it was the one-long-text shape, not the turn count) |
@@ -135,9 +147,11 @@ Honest deviations, stated not hidden:
   exactly where it always made sense — after composition ends, while
   only audio drains. BargeGate's sustained-speech requirement is the
   shield against false positives.
-- **The gate is energy, not a VAD** (the endpointing deviation again).
-  A false trip is recoverable by the resume window — but only for the
-  no-live-turn case; a trip during a live turn cancels it.
+- **Barge-in is an energy gate, not a VAD** (browser RMS in the shell's
+  `BargeGate` — a different job from endpointing, which is silero over
+  the sidecar again). A false trip is recoverable by the resume window
+  — but only for the no-live-turn case; a trip during a live turn
+  cancels it.
 - **Mid-stream holder handoff drops the remaining audio** (the text is
   on every screen; the audio is ephemeral, the sendAudio-blip
   precedent). `audio_end` still closes the episode — it means "no more
@@ -155,4 +169,4 @@ Honest deviations, stated not hidden:
 
 ## Deferred (seams intact)
 
-silero-in-sidecar WS endpointing; live partials.
+live partials.

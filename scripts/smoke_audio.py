@@ -3,11 +3,13 @@ the main venv without touching torch (docs/audio-stack.md).
 
 With both sidecars up:
   .venv/Scripts/python.exe scripts/smoke_audio.py
-Writes .probe/smoke_tts_out.wav (listen to it) and prints the transcript
-of the probe speech file. Nonzero exit on any failure — CI-adjacent honest.
+Writes .probe/smoke_tts_out.wav (listen to it), prints the transcript and
+the endpointing verdicts for the probe speech file. Nonzero exit on any
+failure — CI-adjacent honest.
 """
 
 import os
+import re
 import sys
 import time
 import wave
@@ -71,10 +73,43 @@ def stt_smoke() -> bool:
     return True
 
 
+def vad_smoke() -> bool:
+    """Stream the probe speech through /vad the way the mic does — 100 ms
+    blobs, offset-tracked — and check the property the energy gate failed.
+    The file is two concatenated TTS sentences, so the ground truth is
+    EXACTLY ONE hangover-length (20 frames = 0.6 s) silence run inside
+    the speech: the real inter-sentence pause. The energy gate produced
+    two — the second mid-sentence, where a 0.21 s pause at unvoiced
+    consonants inflated past the hangover. That extra cut is the "Yeah."
+    bug."""
+    with wave.open(str(SPEECH_WAV), "rb") as w:
+        assert w.getnchannels() == 1 and w.getframerate() == 16000
+        frames = w.readframes(w.getnframes())
+    blob, stream, verdicts = 3200, "smoke-vad", []
+    t0 = time.time()
+    for off in range(0, len(frames), blob):
+        r = httpx.post(f"{STT_URL}/vad", params={"stream": stream,
+                                                 "off": off},
+                       content=frames[off:off + blob], timeout=30.0)
+        r.raise_for_status()
+        verdicts += r.json()["speech"]
+    dt = time.time() - t0
+    n_frames = len(frames) // 2 // 480             # segmenting.py's grid
+    runs = "".join("1" if v else "0" for v in verdicts)
+    first, last = runs.find("1"), len(runs) - 1 - runs[::-1].find("1")
+    cuts = len(re.findall(r"0{20,}", runs[first:last + 1]))
+    frac = sum(verdicts) / max(1, len(verdicts))
+    ok = len(verdicts) == n_frames and 0.2 < frac < 0.95 and cuts == 1
+    print(f"VAD: {len(verdicts)}/{n_frames} frames, speech fraction "
+          f"{frac:.2f}, {cuts} hangover-length cut(s) inside (want 1) "
+          f"in {dt:.2f} s -> {'ok' if ok else 'FAIL'}")
+    return ok
+
+
 if __name__ == "__main__":
     ok = False
     try:
-        ok = tts_smoke() and stt_smoke()
+        ok = tts_smoke() and stt_smoke() and vad_smoke()
     except httpx.HTTPError as e:
         print(f"sidecar unreachable: {e}")
     sys.exit(0 if ok else 1)
