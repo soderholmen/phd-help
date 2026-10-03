@@ -20,6 +20,7 @@ from phd_helper import sessionlog
 from phd_helper.server.app import (Session, create_app, end_sitting,
                                    ensure_sitting, idle_expired)
 from phd_helper.server.config import Config
+from phd_helper.server.llm import LlmError
 from phd_helper.server.voice import StubStt, StubTts
 from phd_helper.store import DocInfo
 
@@ -61,7 +62,8 @@ async def test_unexpected_error_becomes_an_error_event_not_silence(tmp_path):
         "\\input{sections/intro}\n\\end{document}\n", encoding="utf-8")
     (tmp_path / "sections" / "intro.tex").write_text("Hi.\n", encoding="utf-8")
     state = SimpleNamespace(project=Project(tmp_path), llm=BoomLlm(),
-                            tts=None, config=Config(), fetch=None,
+                            tts=None, config=Config(stream_tts=False),
+                            fetch=None,
                             corpus=Corpus(tmp_path / "c"),
                             corpus_store=None, crossref_mailto="",
                             openalex_mailto="",
@@ -119,7 +121,11 @@ def make_env(tmp_path, store=None, budget=8000):
     corpus.pin(rec.doc_id, "my-paper")
     state = SimpleNamespace(project=Project(paper), llm=RecordingLlm(),
                             tts=StubTts(), config=Config(
-                                context_budget_tokens=budget),
+                                context_budget_tokens=budget,
+                                # the one-shot leg: the chat-only fakes
+                                # here never need chat_stream; the voice
+                                # block turns the streaming leg on
+                                stream_tts=False),
                             fetch=None, corpus=corpus, corpus_store=store,
                             crossref_mailto="", openalex_mailto="",
                             ingest_tasks=set(), gist_task=None,
@@ -314,42 +320,128 @@ def test_ws_binary_frames_drive_a_turn(tmp_path):
     assert "tighten the intro" in joined
 
 
-# -- voice-out: holder-gated audio delivery (SPEC §3) ----------------------
+# -- voice-out: holder-gated, sentence-level audio delivery (SPEC §3) -----
 # The sitting speaks to the endpoint holder only (audio follows the
 # mic); the wire is audio_start{sample_rate} → PCM16 binary → audio_end.
-# While the sitting is speaking, barge-in is the client's playhead
-# problem: the server keeps the stream flowing and says nothing.
+# Sentence-level TTS: the reply is spoken as it is generated — the gate
+# pushes each completed sentence to the sidecar the moment it forms, so
+# audio_start may precede assistant_text. That wire order is not the
+# contract (both are reducer no-ops client-side); what is: audio_start
+# before any PCM16, audio_end last, holder-only.
+
+
+class ChunkyTtsStream:
+    """TtsStream-shaped fake: each push queues one known chunk (silence
+    costs no bytes), finish/abort end the stream. The pause between
+    chunk yields is what makes "while speaking" observable from the
+    test thread: audio_start proves the forwarder is inside the pause."""
+
+    def __init__(self, owner, chunks, pause):
+        self._owner = owner
+        self._chunks = list(chunks)
+        self._pause = pause
+        self._q: asyncio.Queue = asyncio.Queue()
+        self.pushed: list[str] = []
+        self._ended = False
+
+    async def push(self, text):
+        if not text.strip():
+            return
+        self.pushed.append(text)
+        if self._owner.timeline is not None:
+            self._owner.timeline.append(f"push:{text[:8]}")
+        if self._chunks:
+            self._q.put_nowait(self._chunks.pop(0))
+
+    async def finish(self):
+        if not self._ended:
+            self._ended = True
+            self._q.put_nowait(None)
+
+    async def abort(self):
+        if not self._ended:
+            self._ended = True
+            self._q.put_nowait(None)
+
+    async def chunks(self):
+        first = True
+        while True:
+            item = await self._q.get()
+            if item is None:
+                return
+            if not first and self._pause:
+                await asyncio.sleep(self._pause)
+            first = False
+            yield item
 
 
 class ChunkyTts:
-    """Streams known bytes with a controllable pause between chunks.
-    The pause is what makes "while speaking" observable from the test
-    thread: audio_start proves the server is inside the pause."""
+    """Provider seam: stream() opens a handle (the no-holder test counts
+    episodes through this); sample_rate rides audio_start."""
 
     sample_rate = 24000
 
-    def __init__(self, chunks=(b"AB" * 4, b"CD" * 4), pause=0.0):
+    def __init__(self, chunks=(b"AB" * 4, b"CD" * 4), pause=0.0,
+                 timeline=None):
         self.chunks = chunks
         self.pause = pause
+        self.timeline = timeline
         self.requests = 0
+        self.streams: list[ChunkyTtsStream] = []
 
-    async def synthesize(self, text):
+    def stream(self):
         self.requests += 1
-        for i, c in enumerate(self.chunks):
-            if i and self.pause:
-                await asyncio.sleep(self.pause)
-            yield c
+        s = ChunkyTtsStream(self, self.chunks, self.pause)
+        self.streams.append(s)
+        return s
 
     def faulted(self):
         return False
 
 
-class SlowLlm(RecordingLlm):
-    """Holds the turn in the thinking phase so a barge_in lands there."""
+class FakeStreamLlm:
+    """chat_stream-leg fake: replays a script of turns as the event
+    stream the real client produces. Each turn is (pieces, valid_calls);
+    a tool-call turn yields ("toolcalls",) after its preamble. chat() is
+    the PHD_STREAM_TTS=0 leg: same script, one shot."""
+
+    def __init__(self, script, pause=0.0, timeline=None):
+        self.script = list(script)
+        self.pause = pause
+        self.timeline = timeline
+        self.calls: list[list[dict]] = []
+        self.stream_turns = 0
+        self.oneshot_turns = 0
+
+    def _next(self):
+        return self.script.pop(0) if self.script else (["(end)"], [])
+
+    async def chat_stream(self, messages, **kwargs):
+        self.calls.append([dict(m) for m in messages])
+        self.stream_turns += 1
+        pieces, valid = self._next()
+        text = "".join(pieces)
+        msg = {"role": "assistant", "content": text or None}
+        for piece in pieces:
+            if self.pause:
+                await asyncio.sleep(self.pause)
+            if self.timeline is not None:
+                self.timeline.append(f"delta:{piece.strip()[:8]}")
+            yield ("text", piece)
+        if valid:
+            yield ("toolcalls",)
+            msg["tool_calls"] = [
+                {"id": c.id, "type": "function",
+                 "function": {"name": c.name, "arguments": "{}"}}
+                for c in valid]
+        yield ("done", msg, valid, text)
 
     async def chat(self, messages, **kwargs):
-        await asyncio.sleep(0.5)
-        return await super().chat(messages, **kwargs)
+        self.calls.append([dict(m) for m in messages])
+        self.oneshot_turns += 1
+        pieces, valid = self._next()
+        text = "".join(pieces)
+        return {"role": "assistant", "content": text or None}, valid, text
 
 
 def drain(ws, until):
@@ -367,8 +459,28 @@ def drain(ws, until):
             frames.append(("bin", frame["bytes"]))
 
 
+def drain_until_types(ws, wanted):
+    """Frames until every named event type has arrived (binary frames
+    pass through) — for when sends race and order is not the
+    contract."""
+    frames, seen = [], set(wanted)
+    while seen:
+        frame = ws.receive()
+        if frame.get("text") is not None:
+            ev = json.loads(frame["text"])
+            frames.append(("ev", ev))
+            seen.discard(ev["type"])
+        elif frame.get("bytes") is not None:
+            frames.append(("bin", frame["bytes"]))
+    return frames
+
+
 def test_the_holder_hears_the_reply_start_binary_end(tmp_path):
-    state = ws_state(tmp_path, tts=ChunkyTts())
+    state = ws_state(tmp_path, tts=ChunkyTts(),
+                     llm=FakeStreamLlm([(["Tighten the intro. ",
+                                          "Lead with the result."],
+                                         [])]))
+    seed_gists(state)
     with TestClient(create_app(state=state)) as client:
         with client.websocket_connect("/ws/voice?client=c1") as ws:
             assert ws.receive_json()["type"] == "hello"
@@ -377,16 +489,96 @@ def test_the_holder_hears_the_reply_start_binary_end(tmp_path):
             ws.send_json({"type": "typed", "text": "hello"})
             frames = drain(ws, "audio_end")
     types = [p["type"] for k, p in frames if k == "ev"]
-    assert types == ["turn_started", "assistant_text", "audio_start",
-                     "audio_end"]
-    start = next(p for k, p in frames if k == "ev"
-                 and p["type"] == "audio_start")
+    assert types[0] == "turn_started"
+    assert types[-1] == "audio_end"
+    assert {"assistant_text", "audio_start"} <= set(types)
+    # With overlap the order of audio_start vs assistant_text is not
+    # the contract; what is: audio_start opens before any PCM16 rides.
+    start_at = next(i for i, (k, p) in enumerate(frames)
+                    if k == "ev" and p["type"] == "audio_start")
+    first_bin = next(i for i, (k, _) in enumerate(frames) if k == "bin")
+    assert start_at < first_bin
+    start = frames[start_at][1]
     assert start["sample_rate"] == 24000
     assert [p for k, p in frames if k == "bin"] == [b"AB" * 4, b"CD" * 4]
 
 
+def test_audio_starts_before_the_reply_is_fully_generated(tmp_path):
+    # The headline: generation and synthesis overlap. The first
+    # sentence reaches the sidecar (and the socket) while the model is
+    # still dictating the rest — audio_start lands before
+    # assistant_text, and the shared timeline proves the push happened
+    # mid-generation, not after it.
+    timeline = []
+    tts = ChunkyTts(timeline=timeline)
+    llm = FakeStreamLlm([(["The intro is thin. ", "Widen the hook ",
+                           "first. Then cut paragraph two."], [])],
+                        pause=0.15, timeline=timeline)
+    state = ws_state(tmp_path, tts=tts, llm=llm)
+    seed_gists(state)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "arm"})
+            assert ws.receive_json()["type"] == "armed"
+            ws.send_json({"type": "typed", "text": "how?"})
+            frames = drain(ws, "audio_start")
+            types = [p["type"] for k, p in frames if k == "ev"]
+            assert "assistant_text" not in types  # audio, mid-generation
+            # let the dictation finish (shutdown would cancel it and
+            # the timeline would never see the last piece)
+            drain(ws, "assistant_text")
+    assert timeline.index("push:The intr") < timeline.index("delta:first. T")
+
+
+def test_sentences_are_pushed_as_they_complete(tmp_path):
+    tts = ChunkyTts(chunks=(b"AB" * 4,) * 3)
+    llm = FakeStreamLlm([(["Tighten the intro", " now. Then ",
+                           "cut paragraph two. Done."], [])])
+    state = ws_state(tmp_path, tts=tts, llm=llm)
+    seed_gists(state)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "arm"})
+            assert ws.receive_json()["type"] == "armed"
+            ws.send_json({"type": "typed", "text": "hello"})
+            drain(ws, "audio_end")
+    assert tts.streams[0].pushed == ["Tighten the intro now.",
+                                     "Then cut paragraph two.", "Done."]
+
+
+def test_tool_call_preamble_is_spoken_in_one_episode(tmp_path):
+    # Ratified: the agent says its preamble as it types it. The tool
+    # call that follows silences the REST of that message (drop_tail),
+    # and the final text turn rides the same audio episode — one
+    # audio_start, one audio_end, the patch card arriving mid-episode.
+    tts = ChunkyTts(chunks=(b"AB" * 4,) * 4)
+    llm = FakeStreamLlm([
+        (["Let me look at the intro. ", "Half a thought after"],
+         [ValidCall(id="t1", name="section_write", args=WRITE)]),
+        (["Proposed a tightening."], []),
+    ])
+    state = ws_state(tmp_path, tts=tts, llm=llm)
+    seed_gists(state)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "arm"})
+            assert ws.receive_json()["type"] == "armed"
+            ws.send_json({"type": "typed", "text": "tighten it"})
+            frames = drain(ws, "audio_end")
+    assert tts.requests == 1                      # one episode, all turn
+    assert tts.streams[0].pushed == ["Let me look at the intro.",
+                                     "Proposed a tightening."]
+    types = [p["type"] for k, p in frames if k == "ev"]
+    assert "diff" in types                        # card rode mid-episode
+
+
 def test_view_only_tabs_get_the_text_but_never_the_audio(tmp_path):
-    state = ws_state(tmp_path, tts=ChunkyTts())
+    state = ws_state(tmp_path, tts=ChunkyTts(),
+                     llm=FakeStreamLlm([(["Hello there."], [])]))
+    seed_gists(state)
     with TestClient(create_app(state=state)) as client:
         with client.websocket_connect("/ws/voice?client=c1") as holder:
             with client.websocket_connect("/ws/voice?client=c2") as viewer:
@@ -411,9 +603,12 @@ def test_view_only_tabs_get_the_text_but_never_the_audio(tmp_path):
 def test_no_holder_means_no_synthesis(tmp_path):
     # Audio follows the mic: nobody armed, nobody hears it — the reply
     # stays on screen (the §8 TTS-down shape), and the sidecar is never
-    # paid for audio no one will play.
+    # paid for audio no one will play. The holder is decided at the
+    # first completed sentence; no holder means no episode all turn.
     tts = ChunkyTts()
-    state = ws_state(tmp_path, tts=tts)
+    state = ws_state(tmp_path, tts=tts,
+                     llm=FakeStreamLlm([(["Hello there."], [])]))
+    seed_gists(state)
     with TestClient(create_app(state=state)) as client:
         with client.websocket_connect("/ws/voice?client=c1") as ws:
             assert ws.receive_json()["type"] == "hello"
@@ -424,35 +619,43 @@ def test_no_holder_means_no_synthesis(tmp_path):
     assert "audio_start" not in types
 
 
-def test_barge_in_while_speaking_leaves_the_stream_flowing(tmp_path):
-    # The client owns the playhead while the sitting speaks: the server
-    # neither cancels the turn nor declares tts_stopped — the stream
-    # keeps flowing into the client's buffer, and its resume window
-    # decides whether playback continues.
+def test_barge_in_during_overlap_cancels_the_turn(tmp_path):
+    # With sentence-level TTS, speaking no longer implies
+    # generation-done: the sitting can be mid-generation AND mid-audio
+    # at once, so a barge landing while the first sentences are already
+    # audible must kill the live turn (BargeGate's sustained-speech
+    # requirement is the shield against false positives). The text was
+    # not delivered, so this one interrupts loudly.
     tts = ChunkyTts(pause=0.5)
-    state = ws_state(tmp_path, tts=tts)
+    llm = FakeStreamLlm([(["First sentence. ", "Second one. ",
+                           "Third, never dictated."], [])], pause=0.3)
+    state = ws_state(tmp_path, tts=tts, llm=llm)
+    seed_gists(state)
     with TestClient(create_app(state=state)) as client:
         with client.websocket_connect("/ws/voice?client=c1") as ws:
             assert ws.receive_json()["type"] == "hello"
             ws.send_json({"type": "arm"})
             assert ws.receive_json()["type"] == "armed"
             ws.send_json({"type": "typed", "text": "hello"})
-            # audio_start proves the server is mid-pause inside the
-            # synthesize loop: a barge_in landing there is while speaking
             frames = drain(ws, "audio_start")
             ws.send_json({"type": "barge_in"})
-            frames += drain(ws, "audio_end")
+            frames += drain_until_types(ws, {"tts_stopped",
+                                             "turn_interrupted"})
+            # (checked before shutdown: the sitting's end folds the tail)
+            assert "[interrupted]" in json.dumps(state.project.chat_tail())
     types = [p["type"] for k, p in frames if k == "ev"]
-    assert "tts_stopped" not in types
-    assert "turn_interrupted" not in types
-    assert [p for k, p in frames if k == "bin"] == [b"AB" * 4, b"CD" * 4]
+    assert "tts_stopped" in types and "turn_interrupted" in types
+    assert "audio_end" not in types   # an aborted episode ends quietly
 
 
 def test_barge_in_while_thinking_still_cancels(tmp_path):
     # The defensive branch: the client's gate only fires while audio
     # plays, but a barge_in during the thinking phase must still abort
     # the turn (§3: stop now).
-    state = ws_state(tmp_path, llm=SlowLlm())
+    state = ws_state(tmp_path,
+                     llm=FakeStreamLlm([(["Slow. ", "Later."], [])],
+                                       pause=0.5))
+    seed_gists(state)
     with TestClient(create_app(state=state)) as client:
         with client.websocket_connect("/ws/voice?client=c1") as ws:
             assert ws.receive_json()["type"] == "hello"
@@ -467,13 +670,70 @@ def test_barge_in_while_thinking_still_cancels(tmp_path):
     assert set(got) == {"tts_stopped", "turn_interrupted"}
 
 
+def test_barge_in_during_the_drain_is_a_no_op(tmp_path):
+    # The spec's tail case: the reply is fully composed (assistant_text
+    # delivered) and only its audio is draining. The agent is no longer
+    # composing — pause/resume still makes sense for audio that will
+    # not change — so the control no-ops and the drain plays out to
+    # audio_end; the client's own resume window governs the buffer.
+    tts = ChunkyTts(pause=0.5)
+    state = ws_state(tmp_path, tts=tts,
+                     llm=FakeStreamLlm([(["One. ", "Two."], [])]))
+    seed_gists(state)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "arm"})
+            assert ws.receive_json()["type"] == "armed"
+            ws.send_json({"type": "typed", "text": "hello"})
+            frames = drain(ws, "assistant_text")
+            ws.send_json({"type": "barge_in"})
+            # the ack proves the queue drained past the barge: had it
+            # stopped anything, tts_stopped would ride ahead of it
+            ws.send_json({"type": "select_section",
+                          "section": "sections/intro.tex"})
+            frames += drain_until_types(ws, {"audio_end",
+                                             "section_selected"})
+    types = [p["type"] for k, p in frames if k == "ev"]
+    assert "tts_stopped" not in types
+    assert "turn_interrupted" not in types
+    assert "audio_end" in types       # the drain played to its end
+    assert tts.requests == 1
+
+
+def test_barge_in_after_the_turn_is_done_is_a_no_op(tmp_path):
+    # The same no-op one step later: a finished turn has nothing to
+    # stop — the client's own stop covers its buffer. (Was: the
+    # speaking-phase no-op; overlap moved it to "reply composed or
+    # not", which draining above pins at the exact boundary.)
+    # No holder means no audio tail: the turn is done at assistant_text.
+    state = ws_state(tmp_path, llm=FakeStreamLlm([(["Done."], [])]))
+    seed_gists(state)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "typed", "text": "hello"})
+            drain(ws, "assistant_text")
+            ws.send_json({"type": "barge_in"})
+            # the ack proves the queue drained past the barge: had it
+            # stopped anything, tts_stopped would ride ahead of it
+            ws.send_json({"type": "select_section",
+                          "section": "sections/intro.tex"})
+            frames = drain(ws, "section_selected")
+    types = [p["type"] for k, p in frames if k == "ev"]
+    assert "tts_stopped" not in types
+    assert "turn_interrupted" not in types
+
+
 def test_holder_handoff_mid_stream_drops_the_rest(tmp_path):
     # Audio follows the mic: when the lease moves on, the ex-holder's
     # stream stops where it stood and the rest is text-only. audio_end
     # still arrives — it means "no more is coming", and a client left
     # with an open episode would keep its barge gate live on silence.
     tts = ChunkyTts(pause=0.5)
-    state = ws_state(tmp_path, tts=tts)
+    llm = FakeStreamLlm([(["One. ", "Two. ", "Three."], [])])
+    state = ws_state(tmp_path, tts=tts, llm=llm)
+    seed_gists(state)
     with TestClient(create_app(state=state)) as client:
         with client.websocket_connect("/ws/voice?client=c1") as ws:
             assert ws.receive_json()["type"] == "hello"
@@ -526,7 +786,10 @@ def test_a_final_during_audio_ends_the_spoken_turn_quietly(tmp_path):
     # shown, so the cancelled turn ends quietly — no second
     # [interrupted] in the history, no turn_interrupted on the wire.
     tts = ChunkyTts(pause=0.5)
-    state = ws_state(tmp_path, tts=tts)
+    llm = FakeStreamLlm([(["First reply. ", "And another."], []),
+                        (["Second reply."], [])])
+    state = ws_state(tmp_path, tts=tts, llm=llm)
+    seed_gists(state)
     with TestClient(create_app(state=state)) as client:
         with client.websocket_connect("/ws/voice?client=c1") as ws:
             assert ws.receive_json()["type"] == "hello"
@@ -540,6 +803,63 @@ def test_a_final_during_audio_ends_the_spoken_turn_quietly(tmp_path):
     assert "turn_interrupted" not in types
     assert tts.requests == 2
     assert "[interrupted]" not in json.dumps(state.project.chat_tail())
+
+
+def test_a_stream_fault_mid_reply_errors_inline_and_stops_the_audio(tmp_path):
+    # §8: vLLM dies mid-stream. The error envelope rides where="llm"
+    # exactly as the one-shot leg's does (streaming changed the leg,
+    # not the failure contract), nothing half-generated ships as text,
+    # and the half-spoken episode aborts quietly — no audio_end (the
+    # reply was never delivered; the client's error path owns the stop).
+    class FlakyStreamLlm(FakeStreamLlm):
+        async def chat_stream(self, messages, **kwargs):
+            self.calls.append([dict(m) for m in messages])
+            self.stream_turns += 1
+            yield ("text", "Half a sentence. ")
+            raise LlmError("vLLM stream failed: connection reset")
+
+    tts = ChunkyTts()
+    state = ws_state(tmp_path, tts=tts, llm=FlakyStreamLlm([]))
+    seed_gists(state)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "arm"})
+            assert ws.receive_json()["type"] == "armed"
+            ws.send_json({"type": "typed", "text": "hello"})
+            frames = drain(ws, "error")
+            ws.send_json({"type": "select_section",
+                          "section": "sections/intro.tex"})
+            frames += drain(ws, "section_selected")  # queue drained past
+    types = [p["type"] for k, p in frames if k == "ev"]
+    err = next(p for k, p in frames if k == "ev" and p["type"] == "error")
+    assert err["where"] == "llm"
+    assert "assistant_text" not in types   # nothing half-made shipped
+    assert "audio_end" not in types        # aborted, not ended
+
+
+def test_kill_switch_falls_back_to_one_shot_delivery(tmp_path):
+    # PHD_STREAM_TTS=0: today's behavior — one-shot chat(), the whole
+    # reply in a single push, through the SAME episode code (the flag
+    # is nearly free, and the fallback keeps every wire semantic).
+    tts = ChunkyTts()
+    llm = FakeStreamLlm([(["The whole reply, ", "one shot."], [])])
+    state = ws_state(tmp_path, tts=tts, llm=llm)
+    state.config.stream_tts = False
+    seed_gists(state)
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+            ws.send_json({"type": "arm"})
+            assert ws.receive_json()["type"] == "armed"
+            ws.send_json({"type": "typed", "text": "hello"})
+            frames = drain(ws, "audio_end")
+            # (before shutdown: the sitting's end distills via chat() too)
+            assert llm.oneshot_turns == 1 and llm.stream_turns == 0
+    assert tts.streams[0].pushed == ["The whole reply, one shot."]
+    types = [p["type"] for k, p in frames if k == "ev"]
+    assert types == ["turn_started", "assistant_text", "audio_start",
+                     "audio_end"]
 
 
 # -- /health store probe (SPEC §8, issue #22) -------------------------------
@@ -864,7 +1184,9 @@ async def test_distill_skips_empty_sittings_and_llm_faults(tmp_path):
 
 
 def ws_state(tmp_path, tts=None, llm=None):
-    """make_env's state plus what only the WS door reaches for."""
+    """make_env's state plus what only the WS door reaches for. A
+    caller-supplied llm is a streaming fake, so the voice leg is on
+    for it; make_env keeps it off for the chat-only fakes."""
     state, _ = make_env(tmp_path)
     state.endpoint = VoiceEndpoint(ping_interval=2.0, lease_timeout=60.0)
     state.stt = StubStt()
@@ -874,6 +1196,7 @@ def ws_state(tmp_path, tts=None, llm=None):
         state.tts = tts
     if llm is not None:
         state.llm = llm
+        state.config.stream_tts = True
     return state
 
 

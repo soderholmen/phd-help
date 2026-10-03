@@ -219,7 +219,7 @@ def make_tts(handler, **kw):
 
 
 @pytest.mark.anyio
-async def test_moss_tts_runs_the_probe_sequence_and_streams_audio():
+async def test_moss_tts_stream_runs_the_incremental_wire_sequence():
     seen = []
 
     def handler(request):
@@ -230,18 +230,44 @@ async def test_moss_tts_runs_the_probe_sequence_and_streams_audio():
         return httpx.Response(200, json={"status": "ok"})
 
     tts = make_tts(handler)
-    chunks = [c async for c in tts.synthesize("hello")]
-    assert b"".join(chunks) == b"AB" * 100
-    assert [p for _, p, _ in seen] == ["/tts/session/start",
-                                       "/tts/session/push",
-                                       "/tts/session/phd/audio"]
+    s = tts.stream()
+    await s.push("one. ")
+    await s.push("two.")
+    await s.finish()
+    assert b"".join([c async for c in s.chunks()]) == b"AB" * 100
+    paths = [p for _, p, _ in seen]
+    assert paths[0] == "/tts/session/start"
+    assert "/tts/session/phd/audio" in paths          # the reader's GET
+    pushes = [b for _, p, b in seen if p == "/tts/session/push"]
+    assert [b["text"] for b in pushes] == ["one. ", "two.", ""]
+    assert [b["is_final"] for b in pushes] == [False, False, True]
     assert seen[0][2] == {"session_id": "phd", "prompt_audio": "ref.mp3"}
-    assert seen[1][2] == {"session_id": "phd", "text": "hello",
-                          "is_final": True}
 
 
 @pytest.mark.anyio
-async def test_moss_tts_reuses_the_session_across_turns():
+async def test_moss_tts_stream_opens_audio_only_after_start_returns():
+    # fast_api's GET generator captures the turn's queue AT generator
+    # start: a GET issued before the start POST would attach to the
+    # PREVIOUS turn's queue and hang. Pin the order.
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        if request.url.path == "/tts/session/phd/audio":
+            return httpx.Response(200, content=b"zz")
+        return httpx.Response(200, json={})
+
+    tts = make_tts(handler)
+    s = tts.stream()
+    await s.push("hello")
+    await s.finish()
+    [c async for c in s.chunks()]
+    assert seen.index("/tts/session/phd/audio") > seen.index(
+        "/tts/session/start")
+
+
+@pytest.mark.anyio
+async def test_moss_tts_stream_reuses_the_session_across_turns():
     starts = []
 
     def handler(request):
@@ -252,13 +278,45 @@ async def test_moss_tts_reuses_the_session_across_turns():
         return httpx.Response(200, json={})
 
     tts = make_tts(handler)
-    assert [c async for c in tts.synthesize("one")] == [b"zz"]
-    assert [c async for c in tts.synthesize("two")] == [b"zz"]
+    for text in ("one", "two"):
+        s = tts.stream()
+        await s.push(text)
+        await s.finish()
+        assert [c async for c in s.chunks()] == [b"zz"]
     assert starts == ["phd", "phd"]   # same sid: prompt tokens stay cached
 
 
 @pytest.mark.anyio
-async def test_moss_tts_error_ends_the_stream_clean_and_faults():
+async def test_moss_tts_stream_abort_closes_without_final_and_next_start_works():
+    # No abort endpoint exists — the abandoned turn auto-finishes on the
+    # next start (new_turn=True); the client's job is to stop reading.
+    seen = []
+
+    def handler(request):
+        seen.append((request.url.path,
+                     json.loads(request.content) if request.content else None))
+        if request.url.path == "/tts/session/phd/audio":
+            return httpx.Response(200, content=b"zz")
+        return httpx.Response(200, json={})
+
+    tts = make_tts(handler)
+    s = tts.stream()
+    await s.push("stale sentence")
+    await s.abort()
+    got = [c async for c in s.chunks()]  # must END, not hang — the contract
+    assert got in ([], [b"zz"])          # partial or none, both honest
+    finals = [b for p, b in seen
+              if p == "/tts/session/push" and b.get("is_final")]
+    assert finals == []
+    s2 = tts.stream()
+    await s2.push("fresh")
+    await s2.finish()
+    assert [c async for c in s2.chunks()] == [b"zz"]
+    assert [p for p, _ in seen].count("/tts/session/start") == 2
+
+
+@pytest.mark.anyio
+async def test_moss_tts_stream_error_ends_chunks_clean_and_faults():
     state = {"n": 0}
 
     def handler(request):
@@ -270,19 +328,27 @@ async def test_moss_tts_error_ends_the_stream_clean_and_faults():
         ) else httpx.Response(200, json={})
 
     tts = make_tts(handler)
-    assert [c async for c in tts.synthesize("a")] == []
-    assert [c async for c in tts.synthesize("b")] == []
-    assert [c async for c in tts.synthesize("c")] == []
+    for _ in range(3):
+        s = tts.stream()
+        await s.push("a")
+        await s.finish()
+        assert [c async for c in s.chunks()] == []
     assert tts.faulted()
-    assert [c async for c in tts.synthesize("d")] == [b"ok"]
+    s = tts.stream()
+    await s.push("d")
+    await s.finish()
+    assert [c async for c in s.chunks()] == [b"ok"]
     assert not tts.faulted()
 
 
 @pytest.mark.anyio
-async def test_moss_tts_empty_text_skips_the_network():
+async def test_moss_tts_empty_push_skips_the_network():
     calls = []
     tts = make_tts(lambda r: calls.append(r) or httpx.Response(200))
-    assert [c async for c in tts.synthesize("   ")] == []
+    s = tts.stream()
+    await s.push("   ")
+    await s.finish()          # never opened: the episode touched no network
+    assert [c async for c in s.chunks()] == []
     assert calls == []
 
 
@@ -313,7 +379,10 @@ async def test_moss_tts_surfaces_the_sample_rate_header():
 
     tts = make_tts(handler)
     assert tts.sample_rate == 24000          # before any stream: the default
-    [c async for c in tts.synthesize("hi")]
+    s = tts.stream()
+    await s.push("hi")
+    await s.finish()
+    [c async for c in s.chunks()]
     assert tts.sample_rate == 16000          # the sidecar's own truth
 
 
@@ -325,7 +394,10 @@ async def test_moss_tts_sample_rate_defaults_when_the_header_is_absent():
         return httpx.Response(200, json={})
 
     tts = make_tts(handler)
-    [c async for c in tts.synthesize("hi")]
+    s = tts.stream()
+    await s.push("hi")
+    await s.finish()
+    [c async for c in s.chunks()]
     assert tts.sample_rate == 24000
 
 

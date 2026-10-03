@@ -51,6 +51,15 @@ def _vad_threshold() -> float:
             f"PHD_VAD_THRESHOLD must be a number, got {raw!r}") from None
 
 
+def _flag(name: str, default: str) -> bool:
+    # Parsed at construction like the numeric knobs: a typo must fail
+    # Config() with an actionable message, never silently flip a switch.
+    raw = os.environ.get(name, default)
+    if raw in ("0", "1"):
+        return raw == "1"
+    raise ValueError(f"{name} must be '0' or '1', got {raw!r}")
+
+
 def _read_key_store(name):
     try:
         for line in KEY_STORE.read_text(encoding="utf-8").splitlines():
@@ -116,6 +125,12 @@ class Config:
             str(REPO_ROOT / ".probe" / "MOSS-TTS" / "assets" / "audio"
                 / "reference_en_0.mp3")))
     vad_threshold: float = field(default_factory=_vad_threshold)
+    # Sentence-level TTS off the token stream (docs/audio-stack.md). The
+    # kill switch exists because vLLM SSE × thinking mode × tool-call
+    # fragmentation is live-risk and only partially unit-testable: "0"
+    # falls back to one-shot chat() + one push, same audio episode.
+    stream_tts: bool = field(
+        default_factory=lambda: _flag("PHD_STREAM_TTS", "1"))
 
     def __post_init__(self):
         # A typo'd stack must not silently degrade to "off" (§8: state is

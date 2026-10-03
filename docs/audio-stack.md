@@ -75,26 +75,50 @@ worked.
 
 ## Voice-out (shipped)
 
-The endpoint holder hears replies: `run_turn` streams the MOSS PCM16 to
-the holder's socket between `audio_start{sample_rate}` and `audio_end`
-(view-only tabs get text only — audio follows the mic), and the shell's
-`PcmPlayer` plays it through a jitter-buffered scheduling queue
-(`web/app/src/voice/`). Barge-in: 200 ms of sustained AEC'd mic while
-playing pauses the playhead instantly; if the utterance yields no final
-transcript within 2.5 s, playback resumes where it stopped (SPEC §3).
+The endpoint holder hears replies **as they are generated**: `run_turn`
+pumps the vLLM SSE stream through `SentenceGate` (`sentences.py` — the
+boundary rules bend around LaTeX: braces, `$…$`, abbrevials, decimals),
+pushes each completed sentence to the MOSS session
+(`/tts/session/push`, `is_final=False`), and an `AudioEpisode`
+forwarder streams the PCM16 to the holder's socket between
+`audio_start{sample_rate}` and `audio_end` (view-only tabs get text
+only — audio follows the mic). Generation and synthesis overlap, so
+the first audio lands seconds into the reply instead of ~13 s after
+the whole turn. The shell's `PcmPlayer` plays it through a
+jitter-buffered scheduling queue (`web/app/src/voice/`).
+`PHD_STREAM_TTS=0` is the kill switch: one-shot `chat()` + one push,
+through the same episode code (same wire, same semantics).
 No holder armed ⇒ no synthesis at all (screen-only, the §8 TTS-down
 shape). Disarming stops playback.
 
+Barge-in: 200 ms of sustained AEC'd mic while playing pauses the
+playhead instantly and sends the control; while the agent is still
+composing the server **cancels the turn** and fans out `tts_stopped`,
+which hard-stops every player and kills its resume window. Once the
+reply is fully composed — audio draining, or the turn already done —
+there is nothing to un-ring: the control is a no-op and the client's
+2.5 s resume window governs the buffered audio (SPEC §3).
+
 Honest deviations, stated not hidden:
 
-- **13 s TTFB bends "stops immediately."** A barge-in stops what has
-  been buffered; the unbuffered remainder of a still-synthesizing reply
-  is stranded when a final supersedes the turn. The text was already on
-  screen, so nothing is lost that §3 promised audibly.
+- **Tool-call preambles are spoken** (ratified): the agent says "let
+  me look at the intro…" as it types it; the tool call that follows
+  silences the rest of that message, and the final text turn rides
+  the same audio episode. A validation bounce can supersede a spoken
+  preamble — the retry's text replaces what the first attempt said.
+- **The holder is decided at the first completed sentence**: arming
+  the mic mid-turn misses that turn's audio (the episode was already
+  dead, and the sidecar was never paid for it).
+- **A barge during the overlap kills a live turn** — the accepted
+  cost of overlap: with sentence-level TTS, "speaking" no longer
+  implies "generation done", so while the agent composes, pause/resume
+  cannot un-ring sentences it keeps writing. The no-op survives
+  exactly where it always made sense — after composition ends, while
+  only audio drains. BargeGate's sustained-speech requirement is the
+  shield against false positives.
 - **The gate is energy, not a VAD** (the endpointing deviation again).
-  A false trip is recoverable by the resume window.
-- **Resume is playhead-only.** A barge-in during the thinking phase has
-  no audio to resume — that turn is cancelled as before.
+  A false trip is recoverable by the resume window — but only for the
+  no-live-turn case; a trip during a live turn cancels it.
 - **Mid-stream holder handoff drops the remaining audio** (the text is
   on every screen; the audio is ephemeral, the sendAudio-blip
   precedent). `audio_end` still closes the episode — it means "no more
@@ -112,5 +136,4 @@ Honest deviations, stated not hidden:
 
 ## Deferred (seams intact)
 
-silero-in-sidecar WS endpointing; live partials; sentence-level TTS off
-the token stream.
+silero-in-sidecar WS endpointing; live partials.

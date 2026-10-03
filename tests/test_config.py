@@ -72,3 +72,23 @@ def test_corpus_url_reads_env_at_construction(monkeypatch):
     # process) can repoint the corpus sidecar.
     monkeypatch.setenv("PHD_CORPUS_URL", "http://127.0.0.1:9991")
     assert Config().corpus_url == "http://127.0.0.1:9991"
+
+
+def test_stream_tts_defaults_on(monkeypatch):
+    monkeypatch.delenv("PHD_STREAM_TTS", raising=False)
+    assert Config().stream_tts is True
+
+
+def test_stream_tts_reads_env(monkeypatch):
+    monkeypatch.setenv("PHD_STREAM_TTS", "0")
+    assert Config().stream_tts is False
+
+
+def test_malformed_stream_tts_fails_loudly_at_construction(monkeypatch):
+    # A typo must not silently flip the kill switch (§8: state is known
+    # at startup, not discovered mid-turn).
+    monkeypatch.setenv("PHD_STREAM_TTS", "maybe")
+    with pytest.raises(ValueError, match="PHD_STREAM_TTS"):
+        Config()
+    monkeypatch.setenv("PHD_STREAM_TTS", "1")
+    assert Config().stream_tts is True

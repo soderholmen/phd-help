@@ -29,13 +29,30 @@ class SttProvider(Protocol):
     def faulted(self) -> bool: ...
 
 
+class TtsStream(Protocol):
+    """One turn's incremental synthesis (the sentence-level TTS slice).
+    push() feeds sentences as they complete; finish() says no more text
+    is coming; abort() abandons. chunks() yields PCM16 until
+    end-of-stream — it ends on every path, so the caller's audio
+    episode never hangs open."""
+
+    async def push(self, text: str) -> None: ...
+
+    async def finish(self) -> None: ...
+
+    async def abort(self) -> None: ...
+
+    def chunks(self) -> AsyncIterator[bytes]: ...
+
+
 class TtsProvider(Protocol):
     sample_rate: int
     """PCM16 rate the chunks are at; audio_start carries it to the
     player. A provider may update it when a stream opens."""
 
-    async def synthesize(self, text: str) -> AsyncIterator[bytes]:
-        """Yield audio chunks for one sentence (180 ms TTFB target)."""
+    def stream(self) -> TtsStream:
+        """Open a synthesis handle. Cheap and synchronous: the wire
+        work starts at the first push (180 ms TTFB target per sentence)."""
 
     def faulted(self) -> bool: ...
 
@@ -55,16 +72,30 @@ class StubStt:
         return False
 
 
+class StubTtsStream:
+    async def push(self, text: str) -> None:
+        pass
+
+    async def finish(self) -> None:
+        pass
+
+    async def abort(self) -> None:
+        pass
+
+    async def chunks(self):
+        return
+        yield b""  # pragma: no cover — makes this an async generator
+
+
 class StubTts:
     sample_rate = 24000
 
     def __init__(self):
         self.requests = 0
 
-    async def synthesize(self, text: str):
-        self.requests += 1
-        return
-        yield b""  # pragma: no cover — makes this an async generator
+    def stream(self) -> StubTtsStream:
+        self.requests += 1   # the no-holder test counts episodes through this
+        return StubTtsStream()
 
     def faulted(self) -> bool:
         return False
