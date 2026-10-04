@@ -8,10 +8,13 @@ MossTts — and these Protocols are the client-side contract they satisfy.
 The stubs keep the same shape so tests and the PHD_AUDIO_STACK=off path
 need no sidecars at all.
 
-Deferred, seam intact: live partials (NeMo 3.0 has no stateful per-chunk
-streaming API). Browser audio-out shipped: run_turn streams the chunks
-plus an audio_start{sample_rate}/audio_end bookend to the endpoint
-holder's socket, and the shell's PcmPlayer plays and barges in.
+Live partials shipped (docs/audio-stack.md): the streaming sidecar
+(nemotron via transformers' chunked_limited path, CPU) answers a
+growing hypothesis per utterance-so-far, and SidecarStt carries it to
+the endpoint holder's socket as user_partial — the finals path here is
+untouched. Browser audio-out shipped: run_turn streams the chunks plus
+an audio_start{sample_rate}/audio_end bookend to the endpoint holder's
+socket, and the shell's PcmPlayer plays and barges in.
 """
 
 import json
@@ -59,10 +62,13 @@ class TtsProvider(Protocol):
 
 class StubStt:
     """Captures and meters audio but produces no finals — transcripts
-    arrive typed while PHD_AUDIO_STACK=off. Honest, not fake."""
+    arrive typed while PHD_AUDIO_STACK=off. Honest, not fake. Takes the
+    on_partial callback for shape parity and never calls it: a stub
+    that invented partials would be the fake this module refuses."""
 
-    def __init__(self):
+    def __init__(self, on_partial=None):
         self.bytes_received = 0
+        self.on_partial = on_partial
 
     async def feed(self, pcm16_bytes: bytes) -> list[str]:
         self.bytes_received += len(pcm16_bytes)

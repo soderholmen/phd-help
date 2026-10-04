@@ -7,6 +7,11 @@ export type ServerEvent =
   // What the mic heard, fanned to every tab. Typed text is NOT echoed —
   // the typing tab adds its own optimistically (LocalEvent user_send).
   | { type: "user_text"; text: string; section: string }
+  // The words forming while the sentence is still spoken — deliberately
+  // the asymmetry of user_text: sent to the endpoint holder's socket
+  // only (another tab showing your mic's ghost text is wrong), and
+  // never a transcript line. "" clears the ghost.
+  | { type: "user_partial"; text: string }
   | { type: "turn_started" }
   | { type: "assistant_text"; text: string }
   | {

@@ -125,6 +125,17 @@ class Config:
             str(REPO_ROOT / ".probe" / "MOSS-TTS" / "assets" / "audio"
                 / "reference_en_0.mp3")))
     vad_threshold: float = field(default_factory=_vad_threshold)
+    # Live partials (docs/audio-stack.md): the streaming sidecar answers
+    # a growing hypothesis per utterance-so-far. Default ON — the probe
+    # measured CPU fp32 RTF 0.24 (2026-10-04), under the 0.5 the plan
+    # set; "0" ships the finals-only path (ghost text never appears).
+    # Only ever wired under audio_stack=local: the stub has no model to
+    # guess with, and inventing partials there would be a fake.
+    partials: bool = field(default_factory=lambda: _flag("PHD_PARTIALS",
+                                                         "1"))
+    partials_url: str = field(
+        default_factory=lambda: os.environ.get(
+            "PHD_PARTIALS_URL", "http://127.0.0.1:8092"))
     # Endpointing engine (docs/audio-stack.md): "silero" asks the ASR
     # sidecar's VAD per mic blob — the energy gate cut real speech at
     # micro-pauses (the live listen-test heard "Yeah." where a sentence

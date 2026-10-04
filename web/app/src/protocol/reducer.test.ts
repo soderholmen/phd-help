@@ -182,6 +182,47 @@ describe("turn taking", () => {
   });
 });
 
+describe("live partials", () => {
+  it("a partial replaces the previous partial — ghost text, never a message", () => {
+    // Each partial is the whole utterance-so-far, not a delta; the
+    // transcript contract is that only the final joins messages.
+    const s = fold(
+      { type: "user_partial", text: "tight" },
+      { type: "user_partial", text: "tighten the" },
+    );
+    expect(s.partial).toBe("tighten the");
+    expect(s.messages).toHaveLength(0);
+  });
+
+  it("the final clears the ghost it was forming into", () => {
+    const s = fold(
+      { type: "user_partial", text: "tighten it" },
+      { type: "user_text", text: "tighten it", section: "" },
+    );
+    expect(s.partial).toBe("");
+    expect(s.messages).toEqual([{ id: 1, role: "user", text: "tighten it" }]);
+  });
+
+  it("an empty partial clears the ghost (close without a final)", () => {
+    const s = fold({ type: "user_partial", text: "half a word" }, { type: "user_partial", text: "" });
+    expect(s.partial).toBe("");
+  });
+
+  it("disarm clears a ghost mid-utterance — no close reaches the server", () => {
+    const s = fold(
+      { type: "armed", ok: true, holder: "c1" },
+      { type: "user_partial", text: "half a wor" },
+      { type: "disarmed" },
+    );
+    expect(s).toMatchObject({ armed: false, partial: "" });
+  });
+
+  it("a dropped connection clears the ghost too", () => {
+    const s = fold({ type: "user_partial", text: "half a wor" }, { type: "connection_closed" });
+    expect(s.partial).toBe("");
+  });
+});
+
 describe("diffs", () => {
   const diff = {
     type: "diff" as const,

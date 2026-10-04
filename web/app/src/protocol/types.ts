@@ -26,5 +26,9 @@ export interface ShellState {
   selected: string | null;
   armed: boolean;
   rms: number;
+  // The live partial: words forming mid-speech, holder-only on the
+  // wire. Transient by contract — user_partial replaces, user_text and
+  // disarmed clear; it never joins messages (the final is the record).
+  partial: string;
   nextId: number;
 }

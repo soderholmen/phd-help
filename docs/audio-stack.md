@@ -23,14 +23,21 @@ in `server/voice.py`:
   listen-test heard "Yeah." where a sentence was said); with silero the
   0.6 s hangover finally means a real pause. `PHD_VAD=energy` is the
   kill switch back to the pure gate.
-- **No live partials yet.** NeMo 3.0 dropped the stateful per-chunk
-  streaming API the nemotron partials needed.
+- **Live partials ride a third sidecar, not NeMo.** NeMo 3.0 dropped
+  the stateful per-chunk streaming API the nemotron streaming model
+  needs, so partials come from `scripts/partials_server.py` — plain
+  transformers RNNT streaming in the same `.venv-asr`, CPU by decision
+  (measured below). Parakeet stays the authoritative transcript: a
+  partial is ghost text, never a turn.
 
 ## One-time setup
 
 ```powershell
 # ASR sidecar deps (the venv already has NeMo 3.0 + torch cu128)
 .venv-asr/Scripts/pip.exe install fastapi uvicorn silero-vad
+
+# Partials sidecar deps (same venv; the RNNT class needs transformers 5.18)
+.venv-asr/Scripts/pip.exe install "transformers>=5.18"
 
 # TTS sidecar: vendored clone + weights (already done on this box)
 git clone https://github.com/OpenMOSS/MOSS-TTS .probe/MOSS-TTS
@@ -47,6 +54,7 @@ inductor; absent means TritonMissing).
 ```powershell
 .venv-asr/Scripts/python.exe scripts/asr_server.py --port 8090   # loads lazily, ~7 s first call
 .venv-tts/Scripts/python.exe scripts/tts_server.py --port 8083   # ~9 s to /health
+.venv-asr/Scripts/python.exe scripts/partials_server.py --port 8092  # lazy load, CPU fp32
 # backend
 set PHD_AUDIO_STACK=local
 ```
@@ -72,6 +80,14 @@ sentences, so the property the energy gate failed must hold: exactly
 ONE hangover-length (0.6 s) silence cut inside the speech — the real
 inter-sentence pause. The energy gate produced two, the second
 mid-sentence (the "Yeah." shape). Exit 0 only if all three legs worked.
+
+```powershell
+.venv/Scripts/python.exe scripts/smoke_partials.py
+```
+
+The ghost-text leg: cumulative prefixes of the same file through
+`/stream`, one request at a time. Green means the printed hypothesis
+grows every second and never shrinks.
 
 ## Measured on the 5070 Ti (probe, 2026-10-01)
 
@@ -172,6 +188,68 @@ Honest deviations, stated not hidden:
   deferred — the sidecar streams faster than realtime, so mid-stream
   starvation is a cellular-shape problem.
 
+## Live partials (shipped)
+
+Words appear in the composer as **ghost text while you are still
+speaking**. The mic feed already flows through the backend; mid-utterance
+`SidecarStt` pumps the utterance-so-far to the partials sidecar, and
+each growing hypothesis arrives as `user_partial{text}` — a transient
+`partial` in shell state that REPLACES (it is the whole utterance-so-
+far, not a delta) and never joins the transcript. The parakeet final
+lands as `user_text` and clears the ghost: the final is the record,
+the partial is a liveness cue.
+
+**The probe (2026-10-04) decided the ladder — GREEN, CPU by decision:**
+
+| question | number |
+| --- | --- |
+| CPU fp32 RTF (nemotron-speech-streaming-en-0.6b, `chunked_limited`) | **0.24** — under the 0.5 gate |
+| GPU fit | moot: 15359/16303 MiB already used (TTS + parakeet + contexts); the 2.47 GB fp32 model does not fit alongside |
+| verdict | CPU sidecar, `PHD_PARTIALS` default **on**; `PHD_PARTIALS=0` is the kill switch |
+| live smoke (`scripts/smoke_partials.py`) | 11 cumulative prefixes, the hypothesis grew every second; streaming-model word errors present mid-sentence ("Riranka" for the reranker) — the reason the final, not the partial, is the record |
+
+Two transformer-5.18 gotchas the probe paid for in crashes, recorded so
+the next reader doesn't: the streaming dispatch is
+`isinstance(input_features, GeneratorType)` — `iter(list)` is a
+list_iterator and **silently falls through to the offline path**, so
+the chunk feed must be a real generator; and `num_lookahead_tokens` is
+not in the model config — it must be set on the processor AND passed to
+`generate()` (one `LOOKAHEAD` knob in the sidecar feeds both).
+
+**Stateless per request by design:** every `/stream` re-encodes the
+utterance-so-far through the chunked path (first 49 mel frames, then
+56, tail zero-padded — the model's own validator's sizes). The backend
+keeps **one request in flight** and skips while one runs, so the O(n²)
+of re-encoding stays bounded by the probe's measurement shape, and the
+sidecar holds no per-utterance state to leak across sittings. A failed
+partial is no partial (silent); finals are never touched by any of it.
+A generation counter kills a late hypothesis at the close, and the
+close always clears the ghost — including a close without a final, and
+a discarded blip, which never closes at all (the gate drops it below
+`min_utterance` without a verdict; `feed` notices the gone `pending()`
+and clears through the same door).
+
+Honest deviations, stated not hidden:
+
+- **`user_partial` is holder-only on the wire** — the deliberate
+  asymmetry of `user_text`, which fans to every tab. Another tab
+  showing your mic's ghost text is wrong; the ghost is also
+  `aria-hidden`, because the final transcript is the accessible
+  record.
+- **No client-side barge-in clear.** The barge utterance IS the
+  partial's utterance — clearing on barge would flicker live ghost
+  text mid-sentence. The stale cases are covered: the close sends
+  `""` (and so does a discarded blip), while disarm and a dropped
+  connection clear client-side (no close reaches the server when the
+  mic stops mid-utterance).
+- **A dead partials sidecar is invisible by design** — no `/health`
+  key, no faulted state: no ghost text, exactly the pre-partial
+  behavior. Ghost text is a garnish, never a dependency.
+- **The ghost yields to typed text** — if you type while the mic is
+  open, the typed input wins the overlay.
+
 ## Deferred (seams intact)
 
-live partials.
+nothing in the audio stack — endpointing, voice-out and live partials
+all shipped. The phone slice (SPEC:97 barge-in mitigations) stays
+separate work.

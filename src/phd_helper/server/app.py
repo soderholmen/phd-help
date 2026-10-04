@@ -663,7 +663,10 @@ class AppState:
                 vad=EnergyVad(threshold=self.config.vad_threshold),
                 hangover_s=self.config.conversation_hangover_s,
                 min_utterance_s=self.config.min_utterance_s,
-                vad_mode=self.config.vad_engine)
+                vad_mode=self.config.vad_engine,
+                on_partial=self.emit_partial if self.config.partials
+                else None,
+                partials_url=self.config.partials_url)
             self.tts = MossTts(self.config.tts_url,
                                self.config.tts_prompt_wav)
         # PDF fetch is arXiv-spaced too (§6 politeness covers all arXiv
@@ -680,6 +683,26 @@ class AppState:
         if status != 200 or not body:
             raise IngestError(f"PDF fetch failed ({status})")
         return body
+
+    async def emit_partial(self, text: str) -> None:
+        # Live partials ride the HOLDER socket only (docs/audio-stack.md
+        # — the deliberate asymmetry with user_text): the transcript is
+        # shared, but another tab showing your mic's half-spoken ghost
+        # text is wrong. No holder, no sitting, no socket: silence —
+        # partials are decoration and never open a sitting.
+        holder = self.endpoint.endpoint(time.monotonic())
+        sitting = self.sitting
+        if holder is None or sitting is None:
+            return
+        ws = sitting.sockets.get(holder)
+        if ws is None:
+            return
+        try:
+            await ws.send_text(json.dumps({"type": "user_partial",
+                                           "text": text}))
+        except Exception:
+            pass    # a dead socket is pruned by the next fan-out; a
+            # ghost-text send must never break the feed() that made it
 
 
 # Background ingest plumbing, state-agnostic so the HTTP seam can be

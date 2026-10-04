@@ -13,6 +13,7 @@ export const initialState: ShellState = {
   selected: null,
   armed: false,
   rms: 0,
+  partial: "",
   nextId: 1,
 };
 
@@ -44,6 +45,7 @@ export function reducer(state: ShellState, event: ShellEvent): ShellState {
           turnActive: false,
           armed: false,
           rms: 0,
+          partial: "",
         },
         "notice",
         "Connection lost — reconnecting; the sitting resumes",
@@ -78,10 +80,21 @@ export function reducer(state: ShellState, event: ShellEvent): ShellState {
       // §8 honesty for client-side failures: a refused mic never reaches
       // the server, so the reason has to come back as a transcript line.
       return withMessage(state, "notice", event.text);
+    case "user_partial":
+      // Ghost text, holder-only on the wire: each partial REPLACES the
+      // last (it is the whole utterance-so-far, not a delta), and it
+      // never joins messages — the final transcript is the record.
+      return { ...state, partial: event.text };
     case "user_text":
       // A spoken utterance joins the transcript like a typed one; the
-      // server carries the anchor it was logged with (§7 tagging).
-      return withMessage(state, "user", event.text, event.section || undefined);
+      // server carries the anchor it was logged with (§7 tagging). The
+      // ghost it was forming into has now landed — it clears with it.
+      return withMessage(
+        { ...state, partial: "" },
+        "user",
+        event.text,
+        event.section || undefined,
+      );
     case "turn_started":
       return { ...state, turnActive: true };
     case "assistant_text":
@@ -131,7 +144,9 @@ export function reducer(state: ShellState, event: ShellEvent): ShellState {
       }
       return { ...state, armed: true };
     case "disarmed":
-      return { ...state, armed: false };
+      // The mic stops mid-utterance: no close reaches the server, so
+      // this is the only clear left for a ghost that is still showing.
+      return { ...state, armed: false, partial: "" };
     case "audio_start":
     case "audio_end":
     case "tts_stopped":

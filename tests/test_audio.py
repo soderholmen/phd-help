@@ -125,6 +125,19 @@ def test_gate_buffers_partial_frames_across_pushes():
     assert gate.pop() == blob
 
 
+def test_gate_pending_shares_the_utterance_in_progress():
+    # The live-partial pump's feed: what the mic has said so far, while
+    # it is still saying it. pop() keeps owning the authoritative bytes.
+    gate = UtteranceGate(FakeVad([True] * 4 + [False] * 50),
+                         hangover_s=0.6, min_utterance_s=0.1)
+    assert gate.pending() == b""           # idle: nothing to guess at
+    gate.push(LOUD * 4)
+    assert gate.pending() == LOUD * 4      # in progress: the partial feed
+    gate.push(SILENCE * 20)
+    assert gate.ready()
+    assert gate.pending() == b""           # closed: pop() has the bytes
+
+
 # --- SidecarStt ----------------------------------------------------------
 #
 # The gate above is proven; here it just needs to fire, so the scripted VAD
@@ -207,6 +220,155 @@ async def test_sidecar_stt_healthy_probes_the_sidecar():
     down = make_stt(lambda r: (_ for _ in ()).throw(
         httpx.ConnectError("nope", request=r)))
     assert not await down.healthy()
+
+
+# --- SidecarStt live partials ---------------------------------------------
+#
+# The ghost-text leg: mid-utterance blobs kick a best-effort /stream of
+# the gate's pending bytes. It is decoration — the finals path above is
+# the record — so the tests below are mostly about the leg NOT leaking
+# into the record: no turn starts, no late answer outlives the close.
+
+def make_partial_stt(stream_handler, transcribe_handler=None, **kw):
+    heard = []
+
+    async def on_partial(text):
+        heard.append(text)
+
+    kw.setdefault("vad", FakeVad([True] * 10 + [False] * 20))
+    finals = transcribe_handler or (lambda r: httpx.Response(
+        200, json={"text": "the final word"}))
+    stt = SidecarStt(
+        "http://stt.test",
+        http=httpx.AsyncClient(transport=httpx.MockTransport(finals),
+                               base_url="http://stt.test"),
+        hangover_s=0.6, min_utterance_s=0.1,
+        on_partial=on_partial,
+        partials_http=httpx.AsyncClient(
+            transport=httpx.MockTransport(stream_handler),
+            base_url="http://partials.test"),
+        **kw)
+    return stt, heard
+
+
+@pytest.mark.anyio
+async def test_a_partial_provider_emits_partial_events_without_a_turn():
+    streams = []
+
+    def stream_handler(request):
+        streams.append(request.content)
+        return httpx.Response(200, json={"partial": "the quick"})
+
+    def transcribe(request):
+        raise AssertionError("a partial must never reach /transcribe")
+
+    stt, heard = make_partial_stt(stream_handler, transcribe)
+    assert await stt.feed(LOUD * 10) == []      # mid-utterance: no close
+    await stt._partial_task                     # the pump's own request
+    assert heard == ["the quick"]               # ghost text, and only it
+    assert streams == [LOUD * 10]               # the gate's pending bytes
+
+
+@pytest.mark.anyio
+async def test_only_one_partial_is_in_flight_and_the_next_carries_the_longer_prefix():
+    import asyncio
+    hold = asyncio.Event()
+    streams = []
+
+    async def stream_handler(request):
+        streams.append(request.content)
+        if len(streams) == 1:
+            await hold.wait()                   # hold request #1
+        return httpx.Response(200, json={"partial": "x"})
+
+    stt, heard = make_partial_stt(stream_handler)
+    await stt.feed(LOUD * 4)
+    await asyncio.sleep(0)                      # let request #1 in
+    await stt.feed(LOUD * 4)                    # second blob: skipped
+    assert len(streams) == 1
+    hold.set()
+    await stt._partial_task
+    # The next blob sees the finished task and re-posts — with the
+    # LONGER pending prefix (the skipped bytes were never lost: the
+    # gate keeps buffering).
+    await stt.feed(LOUD * 2)
+    await stt._partial_task
+    assert len(streams) == 2 and len(streams[1]) > len(streams[0])
+
+
+@pytest.mark.anyio
+async def test_a_discarded_blip_clears_the_ghost_it_earned():
+    def stream_handler(request):
+        return httpx.Response(200, json={"partial": "half a word"})
+
+    # 2 speech frames under a 3-frame minimum: the gate discards the
+    # blip WITHOUT a close (segmenting.py), so no pop() will ever clear
+    # — the feed that notices the discard is the ghost's only clear.
+    stt, heard = make_partial_stt(stream_handler,
+                                 vad=FakeVad([True] * 2 + [False] * 30))
+    assert await stt.feed(LOUD * 2) == []         # blip forming, ghost earned
+    await stt._partial_task
+    assert heard == ["half a word"]
+    assert await stt.feed(SILENCE * 30) == []     # hangover: blip discarded
+    assert heard == ["half a word", ""]           # ... and the ghost cleared
+
+
+@pytest.mark.anyio
+async def test_a_late_partial_dies_at_the_close_and_the_ghost_clears():
+    import asyncio
+    hold = asyncio.Event()
+
+    async def stream_handler(request):
+        await hold.wait()
+        return httpx.Response(200, json={"partial": "stale ghost"})
+
+    stt, heard = make_partial_stt(stream_handler)
+    await stt.feed(LOUD * 10)
+    await asyncio.sleep(0)                        # partial now in flight
+    in_flight = stt._partial_task
+    finals = await stt.feed(SILENCE * 20)         # the close lands
+    assert finals == ["the final word"]
+    assert heard == [""]                          # ghost cleared at close
+    hold.set()
+    await asyncio.gather(in_flight, return_exceptions=True)
+    assert heard == [""]                          # the late answer died
+
+
+@pytest.mark.anyio
+async def test_a_failed_partial_is_silence_and_the_final_is_untouched():
+    def stream_handler(request):
+        return httpx.Response(500)
+
+    stt, heard = make_partial_stt(stream_handler)
+    assert await stt.feed(LOUD * 10) == []
+    await stt._partial_task
+    assert heard == []                            # no ghost, no complaint
+    assert await stt.feed(SILENCE * 20) == ["the final word"]
+    assert heard == [""]                          # close still clears
+    assert not stt.faulted()                      # the finals leg is fine
+
+
+@pytest.mark.anyio
+async def test_close_without_a_final_still_clears_the_ghost():
+    def stream_handler(request):
+        return httpx.Response(200, json={"partial": "half a word"})
+
+    stt, heard = make_partial_stt(
+        stream_handler, lambda r: httpx.Response(200, json={"text": "  "}))
+    await stt.feed(LOUD * 10)
+    await stt._partial_task
+    assert heard == ["half a word"]
+    assert await stt.feed(SILENCE * 20) == []     # closed, nothing final
+    assert heard == ["half a word", ""]           # the ghost did not stick
+
+
+@pytest.mark.anyio
+async def test_the_stub_never_invents_partials():
+    from phd_helper.server.voice import StubStt
+    heard = []
+    stub = StubStt(on_partial=lambda t: heard.append(t))
+    assert await stub.feed(LOUD * 10) == []       # same contract, silence
+    assert heard == []
 
 
 # --- RemoteVad + the silero leg ------------------------------------------
@@ -434,6 +596,73 @@ def test_vad_mapping_trim_is_invisible_to_the_stream():
     single = mod._vad_verdicts("u", 0, data)      # fresh stream, one POST
     assert streamed == single
     assert len(single) == 16                      # 7680 samples, 16 frames
+
+
+# --- partials sidecar mapping ----------------------------------------------
+#
+# Same rule as the /vad mapping: torch lives behind load_model, so the
+# chunking (the model's own validator's exact sizes — 49 then 56 mel
+# frames, tail zero-padded) is unit-tested against a fake adapter. The
+# real nemotron is proven by the probe (.probe/probe_rnnt_stream.py).
+
+def load_partials_script():
+    import importlib.util
+    path = (Path(__file__).resolve().parents[1] / "scripts"
+            / "partials_server.py")
+    spec = importlib.util.spec_from_file_location("partials_server", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class FakeAdapter:
+    first, step = 49, 56                    # the probe's numbers
+
+    def __init__(self, n_frames, text="the quick brown"):
+        self.n = n_frames
+        self.text = text
+        self.slices = []                    # (frames, pad_to) per chunk
+        self.generate_calls = 0
+
+    def feats(self, body):
+        return type("F", (), {"shape": (1, self.n, 128)})()
+
+    def slice(self, feats, a, b, pad_to=0):
+        self.slices.append((b - a, pad_to))
+        return (a, b)
+
+    def generate(self, chunks):
+        self.generate_calls += 1
+        return self.text
+
+
+def test_stream_mapping_slices_the_probe_chunk_sizes_and_pads_the_tail():
+    mod = load_partials_script()
+    # The probe's 11.8 s file: 1178 mel frames = 49 + 20x56 + 9, so 22
+    # chunks and the 9-frame tail padded to 56 (the validator demands
+    # exact sizes).
+    ad = FakeAdapter(1178)
+    assert mod._hypothesis(ad, b"\x00\x01" * 100) == "the quick brown"
+    assert ad.slices[0] == (49, 0)
+    assert ad.slices[1:-1] == [(56, 0)] * 20
+    assert ad.slices[-1] == (9, 56)
+    assert ad.generate_calls == 1
+
+
+def test_stream_mapping_says_nothing_under_one_first_chunk():
+    mod = load_partials_script()
+    ad = FakeAdapter(30)
+    assert mod._hypothesis(ad, b"\x00\x01" * 8) == ""   # nothing causal
+    assert mod._hypothesis(ad, b"") == ""
+    assert ad.generate_calls == 0           # the sidecar never wakes
+
+
+def test_as_text_flattens_the_decode_list_shape():
+    # The probe's decode came back as ['The quick ...'] — a sidecar that
+    # str()-ed that would speak in brackets.
+    mod = load_partials_script()
+    assert mod._as_text(["The quick brown"]) == "The quick brown"
+    assert mod._as_text("The quick brown") == "The quick brown"
 
 
 # --- MossTts -------------------------------------------------------------
@@ -673,7 +902,8 @@ def test_sidecar_scripts_never_import_the_backend():
     # venv must never gain a path to loading torch in-process (SAC). The
     # only honest guarantee is a pin — an AST one, so prose may name the
     # sin.
-    for script in ("asr_server.py", "tts_server.py", "corpus_server.py"):
+    for script in ("asr_server.py", "tts_server.py", "corpus_server.py",
+                   "partials_server.py"):
         src = (Path(__file__).resolve().parents[1] / "scripts"
                / script).read_text(encoding="utf-8")
         imported = set()

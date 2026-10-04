@@ -112,6 +112,12 @@ class UtteranceGate:
                     self._buffer = []   # a blip; discarded, not leaked
                 self._speaking = False
 
+    def pending(self) -> bytes:
+        """The utterance in progress — empty when idle. This is what a
+        live-partial sidecar gets re-transcribed as the mic keeps
+        feeding; `pop()` still owns the authoritative close."""
+        return b"".join(self._buffer) if self._speaking else b""
+
     def ready(self) -> bool:
         return self._ready
 

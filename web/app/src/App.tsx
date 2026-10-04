@@ -434,7 +434,7 @@ export default function App() {
               </ul>
             </>
           )}
-          <Composer onSend={send} />
+          <Composer onSend={send} partial={state.partial} />
         </main>
         <aside className="right">
           <CorpusPanel

@@ -604,7 +604,25 @@ button { font: inherit; color: inherit; }
 /* -- composer ------------------------------------------------------------ */
 
 .composer { display: flex; gap: var(--sp-2); }
-.composer input { flex: 1; }
+.composer .composer-field { flex: 1; min-width: 0; position: relative; }
+.composer input { width: 100%; }
+/* Ghost text (live partials): the words forming while the sentence is
+   still spoken, sitting inside the input like dictation. Muted +
+   italic so it reads as not-yet-real; pointer-events none so the input
+   stays clickable through it; the padding/border mirror .input so the
+   words start exactly where typed words would. */
+.composer .ghost {
+  position: absolute;
+  inset: 0;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid transparent;
+  color: var(--text-muted);
+  font-style: italic;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
 
 /* -- corpus & files panels ------------------------------------------------- */
 

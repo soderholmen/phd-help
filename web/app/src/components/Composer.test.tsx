@@ -29,4 +29,31 @@ describe("Composer", () => {
     });
     expect(send).toBeEnabled();
   });
+
+  it("a live partial shows as ghost text over the input", () => {
+    const { container } = render(<Composer onSend={() => {}} partial="tighten the in" />);
+    const ghost = container.querySelector(".ghost");
+    expect(ghost).not.toBeNull();
+    expect(ghost).toHaveTextContent("tighten the in");
+    // aria-hidden: the final transcript is the accessible record —
+    // the ghost is a liveness cue for the holder's eyes only.
+    expect(ghost).toHaveAttribute("aria-hidden", "true");
+    // The ghost is an overlay, not the placeholder: the resting hint
+    // stays put.
+    expect(screen.getByLabelText("message")).toHaveAttribute(
+      "placeholder",
+      "type, or arm voice and talk…",
+    );
+  });
+
+  it("no partial, no ghost", () => {
+    const { container } = render(<Composer onSend={() => {}} />);
+    expect(container.querySelector(".ghost")).toBeNull();
+  });
+
+  it("the ghost yields to typed text", () => {
+    const { container } = render(<Composer onSend={() => {}} partial="tighten" />);
+    fireEvent.change(screen.getByLabelText("message"), { target: { value: "typed" } });
+    expect(container.querySelector(".ghost")).toBeNull();
+  });
 });
