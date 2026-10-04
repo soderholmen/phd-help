@@ -105,3 +105,21 @@ def test_malformed_stream_tts_fails_loudly_at_construction(monkeypatch):
         Config()
     monkeypatch.setenv("PHD_STREAM_TTS", "1")
     assert Config().stream_tts is True
+
+
+def test_git_identity_defaults_are_the_app_itself():
+    # Commits carry this identity via per-command -c flags; the server
+    # never writes global or system git config.
+    c = Config()
+    assert c.git_name == "phd-helper"
+    assert c.git_email == "phd-helper@local"
+    assert c.git_credential_helper == ""  # push without -c credential.helper
+
+
+def test_git_knobs_read_env_at_construction(monkeypatch):
+    monkeypatch.setenv("PHD_GIT_NAME", "Katya")
+    monkeypatch.setenv("PHD_GIT_EMAIL", "k@example.org")
+    monkeypatch.setenv("PHD_GIT_CREDENTIAL_HELPER", "manager")
+    c = Config()
+    assert (c.git_name, c.git_email, c.git_credential_helper) == (
+        "Katya", "k@example.org", "manager")

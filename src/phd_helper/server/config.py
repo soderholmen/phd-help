@@ -137,6 +137,19 @@ class Config:
     # falls back to one-shot chat() + one push, same audio episode.
     stream_tts: bool = field(
         default_factory=lambda: _flag("PHD_STREAM_TTS", "1"))
+    # Per-project git (gitrepo.py): the identity that rides each commit
+    # as `-c user.name=… -c user.email=…` — never global config. The
+    # credential helper is the knob for a box whose GCM cannot auth
+    # non-interactively (this one needs the gh helper); empty means
+    # push runs without -c credential.helper.
+    git_name: str = field(
+        default_factory=lambda: os.environ.get("PHD_GIT_NAME", "phd-helper"))
+    git_email: str = field(
+        default_factory=lambda: os.environ.get("PHD_GIT_EMAIL",
+                                               "phd-helper@local"))
+    git_credential_helper: str = field(
+        default_factory=lambda: os.environ.get("PHD_GIT_CREDENTIAL_HELPER",
+                                               ""))
 
     def __post_init__(self):
         # A typo'd stack must not silently degrade to "off" (§8: state is

@@ -31,7 +31,7 @@ from phd_helper.ingest import IngestError, Ingestor
 from phd_helper.patches import AnchoredPatch, section_hash
 from phd_helper.project import Project
 from phd_helper.readable import read_document
-from phd_helper import sessionlog
+from phd_helper import gitrepo, sessionlog
 from phd_helper.saytext import (Unfence, extract_draft, for_speech,
                                 strip_fences)
 from phd_helper.sentences import SentenceGate
@@ -72,6 +72,9 @@ SYSTEM_PROMPT = (
     "it → `pending_decide(diff_id, 'discard')`. Never call "
     "`pending_decide` for a diff proposed in the same turn — the user "
     "has not seen it yet.\n"
+    "6. When the user says to commit or save the paper's progress, call "
+    "`git_commit` (message in their words, empty to auto-date). Never "
+    "offer to push — pushing is an on-screen gesture.\n"
     "Keep spoken replies brief. When speaking, pre-normalize math to "
     "words (say 'E equals m c squared', not symbols) — the TTS engine "
     "hallucinates on dense symbol strings.\n")
@@ -363,6 +366,9 @@ class Session:
                         corpus=self.state.corpus,
                         store=self.state.corpus_store,
                         autojoin=lambda ids: autojoin(self.state, ids),
+                        git_run=getattr(self.state, "git_run", None),
+                        git_name=self.state.config.git_name,
+                        git_email=self.state.config.git_email,
                         # Voice decides only inside the window as of
                         # turn start: the user is asked to approve what
                         # they have seen (rubber-stamp guard).
@@ -936,6 +942,20 @@ async def end_sitting(state, reason: str) -> None:
     state.end_fut = end  # messages arriving mid-distill wait (ensure_sitting)
     try:
         sitting.cancel_turn()
+        # Auto-commit (issue: every project a repo): best-effort, and
+        # deliberately BEFORE the no-turns guard — uploads and hand
+        # edits dirty the tree without ever opening a turn. Capped and
+        # swallowed: a git fault must never block or fail the sitting
+        # end (worst case this extends end_fut by the cap).
+        try:
+            await asyncio.wait_for(
+                gitrepo.auto_commit(
+                    state.project.root,
+                    f"Auto-commit at sitting end ({reason})",
+                    state.config.git_name, state.config.git_email,
+                    run=getattr(state, "git_run", None)), 20)
+        except Exception:
+            pass
         conversation = sitting.history[1:]
         turns = [m for m in conversation if m.get("role") == "user"]
         if not turns:
@@ -1670,6 +1690,80 @@ def create_app(state: "AppState | None" = None,
         return Response(content=buf.getvalue(), media_type="application/zip",
                         headers={"Content-Disposition":
                                  f'attachment; filename="{safe}.zip"'})
+
+    # -- per-project git (issue: every project a repo). Lazy init: the
+    # repo appears at the first commit/status, never at new/import, so
+    # the project doors above stay byte-identical. The git_run seam
+    # mirrors mineru's: tests fake the subprocess, doors never spawn
+    # git. Active project only — no name param, so no traversal guard.
+
+    def _git_run():
+        return getattr(state, "git_run", None)
+
+    @app.get("/project/git/status")
+    async def git_status():
+        # Never 500s: the chip rides the 3 s tick, and a git fault is
+        # shown as an error string, not swallowed as a dead poll.
+        root = state.project.root
+        try:
+            st = await gitrepo.status(root, run=_git_run())
+        except RuntimeError as e:
+            return {"initialized": True, "dirty": False, "last": None,
+                    "has_remote": bool(gitrepo.read_remote(root)),
+                    "error": str(e)}
+        st["has_remote"] = bool(gitrepo.read_remote(root))
+        return st
+
+    @app.post("/project/git/commit")
+    async def git_commit(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}  # {message?}: an empty body is the auto-date case
+        message = str(body.get("message", "")).strip() \
+            or gitrepo.default_message("Commit")
+        try:
+            sha = await gitrepo.auto_commit(
+                state.project.root, message, state.config.git_name,
+                state.config.git_email, run=_git_run())
+        except RuntimeError as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+        return {"ok": True, "commit": sha}
+
+    @app.post("/project/git/push")
+    async def git_push():
+        root = state.project.root
+        url = gitrepo.read_remote(root)
+        if not url:
+            return JSONResponse({"error": "no remote set"},
+                                status_code=400)
+        try:
+            # Never push stale state silently: whatever is on disk is
+            # committed first (a clean tree commits nothing).
+            await gitrepo.auto_commit(
+                root, "Update paper", state.config.git_name,
+                state.config.git_email, run=_git_run())
+            await gitrepo.push(root, url,
+                               state.config.git_credential_helper,
+                               run=_git_run())
+        except RuntimeError as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+        return {"ok": True}
+
+    @app.post("/project/git/remote")
+    async def git_remote(request: Request):
+        body = await request.json()
+        url = str(body.get("url", "")).strip()
+        if not gitrepo.valid_remote_url(url):
+            return JSONResponse({"error": f"not a usable remote URL: "
+                                          f"{url}"}, status_code=400)
+        try:
+            gitrepo.write_remote(state.project.root, url)
+        except OSError as e:  # read_remote swallows the same fault;
+            return JSONResponse({"error": f"could not store the remote: "
+                                          f"{e}"},
+                                status_code=500)  # a write must answer
+        return {"ok": True}
 
     # Private-CA root cert for devices to install (public half only; the CA
     # key never leaves certs/, which is gitignored).

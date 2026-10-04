@@ -16,6 +16,8 @@ const noop = {
   onNew: () => {},
   onImport: () => {},
   onDownload: () => {},
+  onCommit: () => {},
+  onPush: () => {},
 };
 
 const base = {
@@ -25,7 +27,16 @@ const base = {
   health,
   projects: ["my-paper", "next-paper"],
   active: "my-paper",
+  gitStatus: null,
 };
+
+const git = (over = {}) => ({
+  initialized: true,
+  dirty: false,
+  has_remote: true,
+  last: { sha: "abc1234", date: "2026-10-04T09:00:00+02:00", subject: "m" },
+  ...over,
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -101,5 +112,61 @@ describe("Header", () => {
     });
     await new Promise((r) => setTimeout(r, 0));
     expect(onImport).not.toHaveBeenCalled();
+  });
+
+  it("the git chip tells the repo state", () => {
+    render(<Header {...base} {...noop} gitStatus={git({ dirty: true })} />);
+    expect(screen.getByText("● dirty")).toBeInTheDocument();
+    render(
+      <Header
+        {...base}
+        {...noop}
+        gitStatus={git({ initialized: false, has_remote: false, last: null })}
+      />,
+    );
+    expect(screen.getByText("no repo")).toBeInTheDocument();
+  });
+
+  it("Commit asks for a message and passes it on", () => {
+    const onCommit = vi.fn();
+    vi.spyOn(window, "prompt").mockReturnValue(" intro done ");
+    render(<Header {...base} {...noop} onCommit={onCommit} />);
+    fireEvent.click(screen.getByRole("button", { name: "Commit" }));
+    expect(onCommit).toHaveBeenCalledWith("intro done");
+  });
+
+  it("Commit cancelled asks for nothing", () => {
+    const onCommit = vi.fn();
+    vi.spyOn(window, "prompt").mockReturnValue(null);
+    render(<Header {...base} {...noop} onCommit={onCommit} />);
+    fireEvent.click(screen.getByRole("button", { name: "Commit" }));
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it("Push without a remote asks for the URL first", () => {
+    const onPush = vi.fn();
+    vi.spyOn(window, "prompt").mockReturnValue("https://github.com/u/r.git");
+    render(
+      <Header {...base} {...noop} onPush={onPush} gitStatus={git({ has_remote: false })} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Push" }));
+    expect(onPush).toHaveBeenCalledWith("https://github.com/u/r.git");
+  });
+
+  it("Push with a remote pushes directly", () => {
+    const onPush = vi.fn();
+    render(<Header {...base} {...noop} onPush={onPush} gitStatus={git()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Push" }));
+    expect(onPush).toHaveBeenCalledWith();
+  });
+
+  it("Push cancelled at the URL prompt pushes nothing", () => {
+    const onPush = vi.fn();
+    vi.spyOn(window, "prompt").mockReturnValue(null);
+    render(
+      <Header {...base} {...noop} onPush={onPush} gitStatus={git({ has_remote: false })} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Push" }));
+    expect(onPush).not.toHaveBeenCalled();
   });
 });

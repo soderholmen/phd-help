@@ -49,6 +49,37 @@ spine) and refs.bib is not a listed target.
   top-level folder (which is stripped). Validation runs before any
   extraction: a refused zip leaves no half-project.
 
+## Git: every project a repo (commit + push when done)
+
+Each project directory can become a git repo, driven by
+`src/phd_helper/gitrepo.py` (pure parsers + one `run` seam, mineru's
+shape). The `.gitignore` the kernel writes keeps `.phd-helper/` (agent
+state) and LaTeX build dross (`*.aux/*.log/*.pdf`) out; a user's own
+`.gitignore` survives — only the missing patterns are appended.
+
+- `GET /project/git/status` — `{initialized, dirty, has_remote, last}`
+  for the active project; **never 500s** (an uninitialized directory
+  is a zero answer; a git fault arrives as an `error` string on a 200,
+  so the chip rides the 3 s tick like health).
+- `POST /project/git/commit {message?}` — lazy init (init on `main`,
+  write `.gitignore`, initial commit) then commit everything the
+  ignore allows; empty message auto-dates. `{"ok": true, "commit":
+  sha|null}` — a clean tree is a success with `null`, not an error.
+- `POST /project/git/push {}` — 400 `{"error": "no remote set"}`
+  until a remote exists; **whatever is on disk is committed first**
+  ("Update paper") — a push never silently ships stale state. Pushes
+  `main` to the stored URL directly.
+- `POST /project/git/remote {url}` — stores the push target in
+  `.phd-helper/git.json` (not git config); 400 on anything that is
+  not http(s)/ssh/scp-like/absolute-path.
+
+Commit is also **automatic at sitting end** (before §7's no-turns
+guard — uploads and hand edits dirty the tree without a turn), capped
+at 20 s and swallowed: a git fault never blocks or fails the ending.
+And by **voice**: `git_commit(message)` — the user's hand, #28
+posture, no §5 card. **Push is never by voice**: it publishes
+outward, so it stays an on-screen gesture (the ratified line).
+
 ## Honest deviations (documented, not hidden)
 
 - **Direct writes by design.** The file doors skip §5's pending-diff
@@ -63,6 +94,26 @@ spine) and refs.bib is not a listed target.
 - **Import is zip-only.** No server-disk browsing, by design.
 - **Uploads are not linted.** The §5 lint gates agent proposals;
   your own upload is your own bytes.
+- **Git is lazy-init only.** `new`/`import` never touch git; the repo
+  appears at the first commit or status. Existing project doors are
+  byte-identical, and no door test spawns git.
+- **A nested project shows dirt in an outer repo.** A project dir
+  that is itself tracked inside another git repo (the shipped
+  `sample_paper` inside phd-helper) shows `path (modified content)`
+  in the outer `git status` — a nested repo's dirt is unfixable via
+  `.gitignore`. Cosmetic; the outer repo is not phd-helper's problem.
+- **Auto-commit needs a sitting.** No sitting ever opened (or a §8
+  crash path) means no auto-commit — the button and the voice tool
+  are always there.
+- **Push needs a working credential path.** `GIT_TERMINAL_PROMPT=0`
+  makes Git Credential Manager fail fast rather than hang a request
+  on a GUI this server has; a box whose GCM cannot auth
+  non-interactively (this one) sets `PHD_GIT_CREDENTIAL_HELPER` (the
+  gh-helper knob) and push carries it as `-c`.
+- **Identity is per-command.** `-c user.name/email` rides each
+  commit; the server never writes global or system git config.
+- **No branch/history UI.** Always `main`; no log view, no blame, no
+  LFS. The chip shows the last commit's subject as a tooltip.
 
 ## Reopen: cards are disk truth
 

@@ -667,3 +667,63 @@ def test_pending_decide_apply_survives_a_deleted_section_file(paper):
     by = {r["diff_id"]: r for r in result["resolutions"]}
     assert by[d1.id]["applied"] is False and by[d1.id]["reason"]
     assert by[d2.id]["applied"] is True  # the pass continues past the loss
+
+
+# -- git_commit (issue: every project a repo) ------------------------------
+
+
+def git_run(script):
+    from phd_helper import gitrepo
+    calls = []
+
+    async def run(argv, cwd):
+        calls.append(list(argv))
+        step = script.get(gitrepo._label(argv), (0, "", ""))
+        return step(argv) if callable(step) else step
+
+    return run, calls
+
+
+def test_git_commit_is_offered_with_a_required_message():
+    assert OFFERED["git_commit"] == {"message": "string"}
+
+
+@pytest.mark.anyio
+async def test_git_commit_lazy_inits_then_commits_the_message(paper):
+    run, calls = git_run({"status": (0, "M  main.tex\n", ""),
+                          "commit": (0, "", ""),
+                          "rev-parse": (0, "1a2b3c4\n", "")})
+    result = await execute_async(call("git_commit", {"message": "intro done"}),
+                                 paper, git_run=run, git_name="N",
+                                 git_email="e@x")
+    assert result["commit"] == "1a2b3c4"
+    assert calls[0] == ["init", "-b", "main"]
+    assert any("intro done" in arg for c in calls for arg in c)
+
+
+@pytest.mark.anyio
+async def test_git_commit_empty_message_is_auto_dated(paper):
+    run, calls = git_run({"status": (0, "M  main.tex\n", ""),
+                          "commit": (0, "", ""),
+                          "rev-parse": (0, "abc1234\n", "")})
+    await execute_async(call("git_commit", {"message": ""}), paper,
+                        git_run=run)
+    assert any("Voice commit (" in arg for c in calls for arg in c)
+
+
+@pytest.mark.anyio
+async def test_git_commit_clean_tree_says_so(paper):
+    run, _ = git_run({"status": (0, "", "")})
+    result = await execute_async(call("git_commit", {"message": "m"}), paper,
+                                 git_run=run)
+    assert result["commit"] is None
+    assert "clean" in result["note"]
+
+
+@pytest.mark.anyio
+async def test_git_commit_fault_bounces_as_a_tool_error(paper):
+    run, _ = git_run({"status": (0, "M x\n", ""),
+                      "commit": (128, "", "fatal: index.lock")})
+    result = await execute_async(call("git_commit", {"message": "m"}), paper,
+                                 git_run=run)
+    assert "git commit failed" in result["error"]

@@ -5,6 +5,7 @@ live vLLM (§2); this file covers what only the app owns.
 
 import asyncio
 import json
+import shutil
 import time
 
 import pytest
@@ -17,7 +18,7 @@ from phd_helper.toolcall import ValidCall
 from phd_helper.endpoint import VoiceEndpoint
 from phd_helper.patches import section_hash
 from phd_helper.project import Project
-from phd_helper import sessionlog
+from phd_helper import gitrepo, sessionlog
 from phd_helper.saytext import for_speech, strip_fences
 from phd_helper.server.app import (Session, create_app, end_sitting,
                                    ensure_sitting, idle_expired)
@@ -131,8 +132,16 @@ def make_env(tmp_path, store=None, budget=8000):
                             fetch=None, corpus=corpus, corpus_store=store,
                             crossref_mailto="", openalex_mailto="",
                             ingest_tasks=set(), gist_task=None,
-                            sitting=None, endpoint=VoiceEndpoint())
+                            sitting=None, endpoint=VoiceEndpoint(),
+                            # the sitting-end auto-commit must not spawn
+                            # real git in every distill test: a clean
+                            # fake answers, gitrepo never reaches _run
+                            git_run=_clean_git)
     return state, Session(state)
+
+
+async def _clean_git(argv, cwd):
+    return 0, "", ""
 
 
 def sent_text(session) -> str:
@@ -2533,3 +2542,211 @@ def test_download_round_trips_through_import(tmp_path):
         encoding="utf-8") == (src / "main.tex").read_text(encoding="utf-8")
     assert (copy / "sections" / "intro.tex").is_file()
     assert (copy / "refs.bib").is_file()
+
+
+# -- per-project git doors (issue: commit + push when done) ----------------
+
+
+def git_fake(script):
+    """A state.git_run that answers by subcommand label and records
+    every argv — the same discipline as the gitrepo kernel tests."""
+    calls = []
+
+    async def run(argv, cwd):
+        calls.append(list(argv))
+        step = script.get(gitrepo._label(argv), (0, "", ""))
+        return step(argv) if callable(step) else step
+
+    return run, calls
+
+
+def test_git_status_uninitialized_is_a_zero_answer(tmp_path):
+    state = ws_state(tmp_path)
+    run, calls = git_fake({})
+    state.git_run = run
+    with TestClient(create_app(state=state)) as client:
+        assert client.get("/project/git/status").json() == {
+            "initialized": False, "dirty": False, "has_remote": False,
+            "last": None}
+    assert calls == []  # a bare directory never reaches git
+
+
+def test_git_status_reports_dirty_and_a_stored_remote(tmp_path):
+    state = ws_state(tmp_path)
+    root = state.project.root
+    (root / ".git").mkdir()
+    gitrepo.write_remote(root, "https://github.com/u/r.git")
+    run, _ = git_fake({"status": (0, " M main.tex\n", ""),
+                       "log": (0, "abc|2026-01-01T00:00:00+00:00|msg\n",
+                               "")})
+    state.git_run = run
+    with TestClient(create_app(state=state)) as client:
+        got = client.get("/project/git/status").json()
+    assert got["initialized"] and got["dirty"] and got["has_remote"]
+    assert got["last"]["sha"] == "abc"
+
+
+def test_git_status_survives_a_faulting_repo(tmp_path):
+    # The chip rides the 3 s tick: a git fault is a visible error
+    # string, never a 500 that the poll has to swallow silently.
+    state = ws_state(tmp_path)
+    (state.project.root / ".git").mkdir()
+
+    async def broken(argv, cwd):
+        raise RuntimeError("git status failed (128): corrupt index")
+    state.git_run = broken
+    with TestClient(create_app(state=state)) as client:
+        r = client.get("/project/git/status")
+    assert r.status_code == 200
+    assert "corrupt index" in r.json()["error"]
+
+
+def test_git_commit_door_lazy_inits_then_commits(tmp_path):
+    state = ws_state(tmp_path)
+    run, calls = git_fake({"status": (0, "M  main.tex\n", ""),
+                           "commit": (0, "", ""),
+                           "rev-parse": (0, "1a2b3c4\n", "")})
+    state.git_run = run
+    with TestClient(create_app(state=state)) as client:
+        assert client.post("/project/git/commit",
+                           json={"message": "intro done"}).json() \
+            == {"ok": True, "commit": "1a2b3c4"}
+    assert calls[0] == ["init", "-b", "main"]  # lazy init, first commit
+    # the lazy init commits the scaffold first; the user's message is
+    # the SECOND commit (a fake says dirty twice; real git would be
+    # clean after the initial and stop at one)
+    assert any("intro done" in arg for c in calls for arg in c)
+    assert (state.project.root / ".gitignore").is_file()
+
+
+def test_git_commit_clean_tree_is_ok_null(tmp_path):
+    state = ws_state(tmp_path)
+    run, _ = git_fake({"status": (0, "", "")})
+    state.git_run = run
+    with TestClient(create_app(state=state)) as client:
+        assert client.post("/project/git/commit", json={}).json() \
+            == {"ok": True, "commit": None}
+        # {message?}: a bodyless POST is the same auto-date call
+        assert client.post("/project/git/commit").json() \
+            == {"ok": True, "commit": None}
+
+
+@pytest.mark.skipif(not shutil.which("git"), reason="git is not installed")
+def test_git_commit_door_against_real_git(tmp_path):
+    # The one door test that spawns real git: the fake proves argv,
+    # this proves the whole chain — lazy init, the ignore, the sha.
+    state = ws_state(tmp_path)
+    del state.git_run  # no fake: the door reaches gitrepo._run
+    with TestClient(create_app(state=state)) as client:
+        # the lazy init's initial commit takes the scaffold, so the
+        # first call's own commit finds a clean tree
+        assert client.post("/project/git/commit",
+                           json={"message": "first"}).json() \
+            == {"ok": True, "commit": None}
+        (state.project.root / "notes.tex").write_text("% new\n",
+                                                      encoding="utf-8")
+        r = client.post("/project/git/commit",
+                        json={"message": "second"}).json()
+        assert r["ok"] and r["commit"]
+        st = client.get("/project/git/status").json()
+    assert st["initialized"] and not st["dirty"]
+    assert st["last"]["subject"] == "second"
+    assert (state.project.root / ".gitignore").is_file()
+
+
+def test_git_commit_failure_is_an_error_envelope(tmp_path):
+    state = ws_state(tmp_path)
+    run, _ = git_fake({"status": (0, "M x\n", ""),
+                       "commit": (128, "", "fatal: index.lock")})
+    state.git_run = run
+    with TestClient(create_app(state=state)) as client:
+        r = client.post("/project/git/commit", json={"message": "m"})
+    assert r.status_code == 500
+    assert "git commit failed" in r.json()["error"]
+
+
+def test_git_push_without_a_remote_bounces_400(tmp_path):
+    state = ws_state(tmp_path)
+    run, calls = git_fake({})
+    state.git_run = run
+    with TestClient(create_app(state=state)) as client:
+        r = client.post("/project/git/push", json={})
+    assert r.status_code == 400 and r.json()["error"] == "no remote set"
+    assert calls == []  # the remote check precedes any git call
+
+
+def test_git_push_dirty_tree_commits_first(tmp_path):
+    # Never push stale state silently: the dirty tree is committed
+    # ("Update paper") before the push runs.
+    state = ws_state(tmp_path)
+    gitrepo.write_remote(state.project.root, "https://example/r.git")
+    run, calls = git_fake({"status": (0, "M  main.tex\n", ""),
+                           "commit": (0, "", ""),
+                           "rev-parse": (0, "abc1234\n", ""),
+                           "push": (0, "", "")})
+    state.git_run = run
+    with TestClient(create_app(state=state)) as client:
+        assert client.post("/project/git/push", json={}).json() == {"ok": True}
+    assert calls[-1] == ["push", "https://example/r.git", "main"]
+    assert any("Update paper" in arg for c in calls for arg in c)
+
+
+def test_git_push_clean_tree_pushes_directly(tmp_path):
+    state = ws_state(tmp_path)
+    gitrepo.write_remote(state.project.root, "https://example/r.git")
+    run, calls = git_fake({"status": (0, "", ""), "push": (0, "", "")})
+    state.git_run = run
+    with TestClient(create_app(state=state)) as client:
+        assert client.post("/project/git/push", json={}).json() \
+            == {"ok": True}
+    assert not any("commit" in c for c in calls)
+    assert calls[-1] == ["push", "https://example/r.git", "main"]
+
+
+def test_git_remote_door_validates_and_stores(tmp_path):
+    state = ws_state(tmp_path)
+    with TestClient(create_app(state=state)) as client:
+        assert client.post("/project/git/remote",
+                           json={"url": "https://github.com/u/r.git"}
+                           ).json() == {"ok": True}
+        assert client.post("/project/git/remote",
+                           json={"url": "not a url"}).status_code == 400
+    assert gitrepo.read_remote(state.project.root) \
+        == "https://github.com/u/r.git"
+
+
+def test_sitting_end_auto_commits_even_without_turns(tmp_path):
+    # Uploads and hand edits dirty the tree without a single user turn,
+    # so the auto-commit runs BEFORE the no-turns guard (§7's "no trace"
+    # is about the divider and the distill, not the repo).
+    state = ws_state(tmp_path)
+    run, calls = git_fake({"status": (0, "M  main.tex\n", ""),
+                           "commit": (0, "", ""),
+                           "rev-parse": (0, "abc1234\n", "")})
+    state.git_run = run
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            assert ws.receive_json()["type"] == "hello"
+    # the lazy init's initial commit may land first; the sitting-end
+    # message is what proves the auto-commit ran before the turns guard
+    assert any("Auto-commit at sitting end (shutdown)" in arg
+               for c in calls for arg in c)
+    assert state.project.load_memory() == ""  # the guard still holds
+
+
+def test_auto_commit_fault_never_blocks_the_sitting_end(tmp_path):
+    state = ws_state(tmp_path)
+
+    async def broken(argv, cwd):
+        raise RuntimeError("git died")
+    state.git_run = broken
+    with TestClient(create_app(state=state)) as client:
+        with client.websocket_connect("/ws/voice?client=c1") as ws:
+            ws.receive_json()
+            ws.send_json({"type": "typed", "text": "hello there"})
+            while ws.receive_json()["type"] != "assistant_text":
+                pass
+    # the sitting still ended and distilled through the git fault
+    assert state.sitting is None
+    assert state.project.chat_divider()["reason"] == "shutdown"
+    assert state.project.load_memory() == "ok"

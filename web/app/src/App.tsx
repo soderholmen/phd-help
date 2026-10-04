@@ -13,9 +13,14 @@ import { listDocs, pin, retry, unpin, uploadPdf, type UploadMeta } from "./api/c
 import {
   activateProject,
   downloadProject,
+  gitCommit,
+  gitPush,
+  gitSetRemote,
+  gitStatus,
   importProject,
   listProjects,
   newProject,
+  type GitStatus,
 } from "./api/projects";
 import {
   fetchFileContent,
@@ -90,6 +95,10 @@ export default function App() {
   const [active, setActive] = useState("");
   const [files, setFiles] = useState<ProjectFile[]>([]);
   const [trash, setTrash] = useState<string[]>([]);
+  // The git chip rides the same 3 s tick as health: local `git status`
+  // is milliseconds, and the state must be known, not discovered at
+  // the Commit click (§8).
+  const [git, setGit] = useState<GitStatus | null>(null);
   // The read view (SPEC §Section view): Talk/Read is a local view toggle
   // — the transcript keeps living underneath. /document rides the tick
   // only while reading, so the paper stays fresh as the agent writes.
@@ -114,12 +123,13 @@ export default function App() {
   useEffect(() => {
     let stop = false;
     const tick = async () => {
-      const [t, h, d, p, f, doc] = await Promise.allSettled([
+      const [t, h, d, p, f, g, doc] = await Promise.allSettled([
         fetchTree(),
         fetchHealth(),
         listDocs(),
         listProjects(),
         listFiles(),
+        gitStatus(),
         readingRef.current ? fetchDocument() : Promise.resolve(null),
       ]);
       if (stop) return;
@@ -135,6 +145,7 @@ export default function App() {
         setFiles(f.value.files);
         setTrash(f.value.trash);
       }
+      if (g.status === "fulfilled") setGit(g.value);
       if (doc.status === "fulfilled" && doc.value) setDoc(doc.value.sections);
     };
     const go = () => {
@@ -249,6 +260,24 @@ export default function App() {
   const onDownload = (name: string) =>
     void downloadProject(name).catch(notice(`Download ${name}`));
 
+  // The git doors: failures ride the transcript like every other
+  // notice; the chip refreshes after any write so it tells the truth
+  // the moment the door answers.
+  const refreshGit = () => void gitStatus().then(setGit).catch(() => {});
+  const onCommit = (message: string) =>
+    void gitCommit(message).then(refreshGit).catch(notice("Commit"));
+  const onPush = async (remoteUrl?: string) => {
+    try {
+      // The first push pastes the remote (Header's prompt): store it
+      // before pushing, or the door still sees "no remote set".
+      if (remoteUrl) await gitSetRemote(remoteUrl);
+      await gitPush();
+      refreshGit();
+    } catch (e) {
+      notice(remoteUrl ? "Set remote" : "Push")(e);
+    }
+  };
+
   // The edit doors: the user's own hand writes directly (ratified in
   // #28 — no approval card, no lint gate; the base hash is the conflict
   // story). A failed patch rethrows after the notice so the open draft
@@ -294,11 +323,14 @@ export default function App() {
         health={health}
         projects={projects}
         active={active}
+        gitStatus={git}
         onToggleVoice={() => void toggleVoice()}
         onActivate={onActivate}
         onNew={onNew}
         onImport={onImport}
         onDownload={onDownload}
+        onCommit={onCommit}
+        onPush={(url) => void onPush(url)}
       />
       <div className="panels">
         <aside className="left">

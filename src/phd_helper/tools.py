@@ -7,6 +7,7 @@ diff that the user approves. Errors return as tool-result text so the model
 sees them (the bounce), never the user.
 """
 
+from phd_helper import gitrepo
 from phd_helper.bibtex import BibEntry, parse_bib, same_paper
 from phd_helper.cascade import Lookup, resolve_bibtex
 from phd_helper.patches import ApplyResult
@@ -181,6 +182,23 @@ TOOL_SCHEMAS = [
                                            "markdown"}},
             "required": ["content"],
             "additionalProperties": False}}},
+    {"type": "function", "function": {
+        "name": "git_commit",
+        "description": "Commit the project's current files to its git "
+                       "repo, when the user says to commit or save the "
+                       "paper's progress. A direct write — no approval "
+                       "card. Pushing is NOT yours: it is an on-screen "
+                       "gesture because it publishes outward.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string",
+                            "description": "Short commit message in the "
+                                           "user's words; the empty "
+                                           "string lets the app date "
+                                           "it"}},
+            "required": ["message"],
+            "additionalProperties": False}}},
 ]
 
 # name -> {required param: json type} — validate_tool_calls checks both
@@ -244,9 +262,25 @@ async def execute_async(call, project: Project, resolve=resolve_bibtex,
                         search=search_papers, fetch=None, mailto: str = "",
                         openalex_mailto: str = "", corpus=None,
                         store=None, autojoin=None,
-                        window: set[str] | None = None) -> dict:
+                        window: set[str] | None = None,
+                        git_run=None, git_name: str = "phd-helper",
+                        git_email: str = "phd-helper@local") -> dict:
     """Async dispatch: web_search and cite_add hit the network, the corpus
-    tools hit the index; the rest is sync."""
+    tools hit the index, git_commit spawns git; the rest is sync."""
+    if call.name == "git_commit":
+        # The user's hand, #28 posture: a direct write, no §5 card.
+        # The subprocess makes this leg async like the network tools.
+        message = call.args.get("message", "").strip() \
+            or gitrepo.default_message("Voice commit")
+        try:
+            sha = await gitrepo.auto_commit(
+                project.root, message, git_name, git_email, run=git_run)
+        except RuntimeError as e:
+            return {"error": str(e)}
+        return {"commit": sha,
+                "note": ("the paper is saved in the project's git repo; "
+                         "pushing it is an on-screen gesture" if sha else
+                         "nothing to commit — the tree is clean")}
     if call.name == "web_search":
         if fetch is None and search is search_papers:
             # The real search needs an HTTP fetcher; mis-wiring bounces.
