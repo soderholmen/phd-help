@@ -1,34 +1,70 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import { ReadView } from "./ReadView";
-import type { DocSection } from "../types";
+import type { DocSection, FilePatch } from "../types";
+
+// Spans are the patch door's seam: start/end into the file, base the
+// region's hash. `editable` is the kernel's pure-prose verdict.
+const span = (start: number, editable: boolean) => ({
+  start,
+  end: start + 10,
+  base: `hash-${start}`,
+  editable,
+});
 
 const sections: DocSection[] = [
   {
     path: "main.tex",
     title: null,
-    blocks: [{ kind: "heading", level: 0, text: "The Paper" }],
+    blocks: [
+      { kind: "heading", level: 0, text: "The Paper", ...span(6, false) },
+    ],
   },
   {
     path: "sections/a.tex",
     title: "A",
     blocks: [
-      { kind: "heading", level: 1, text: "Section A" },
-      { kind: "paragraph", text: "Prose with [Vaswani, 2017]." },
-      { kind: "list", ordered: false, items: ["one", "two"] },
-      { kind: "list", ordered: true, items: ["first"] },
-      { kind: "math", text: "\\[E=mc^2\\]" },
-      { kind: "caption", text: "The curve." },
-      { kind: "raw", text: "\\begin{myenv} x \\end{myenv}" },
+      { kind: "heading", level: 1, text: "Section A", ...span(8, true) },
+      {
+        kind: "paragraph",
+        text: "Prose with [Vaswani, 2017].",
+        ...span(18, false),
+      },
+      { kind: "paragraph", text: "Plain prose.", ...span(47, true) },
+      {
+        kind: "list",
+        ordered: false,
+        items: ["one", "two"],
+        ...span(60, false),
+      },
+      { kind: "list", ordered: true, items: ["first"], ...span(73, false) },
+      { kind: "math", text: "\\[E=mc^2\\]", ...span(85, false) },
+      { kind: "caption", text: "The curve.", ...span(96, true) },
+      {
+        kind: "raw",
+        text: "\\begin{myenv} x \\end{myenv}",
+        ...span(107, false),
+      },
     ],
   },
 ];
 
+const noop = () => undefined;
+const noPatch = async () => {};
+
 describe("ReadView", () => {
   it("renders every block kind as prose", () => {
-    render(<ReadView sections={sections} />);
+    render(
+      <ReadView sections={sections} onEditSource={noop} onPatch={noPatch} />,
+    );
     expect(
-      screen.getByRole("heading", { level: 1, name: "The Paper" }),
+      screen.getByRole("heading", { level: 1, name: /^The Paper/ }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("heading", { level: 1, name: "Section A" }),
@@ -45,7 +81,9 @@ describe("ReadView", () => {
   });
 
   it("never drops: math and raw blocks show their source", () => {
-    render(<ReadView sections={sections} />);
+    render(
+      <ReadView sections={sections} onEditSource={noop} onPatch={noPatch} />,
+    );
     expect(screen.getByText("\\[E=mc^2\\]").tagName).toBe("PRE");
     expect(screen.getByText("\\begin{myenv} x \\end{myenv}").tagName).toBe(
       "PRE",
@@ -53,7 +91,154 @@ describe("ReadView", () => {
   });
 
   it("an empty document says so", () => {
-    render(<ReadView sections={[]} />);
+    render(
+      <ReadView sections={[]} onEditSource={noop} onPatch={noPatch} />,
+    );
     expect(screen.getByText(/Nothing to read/)).toBeInTheDocument();
+  });
+
+  it("clicking an editable paragraph drafts a patch of exactly its span", async () => {
+    const onPatch = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ReadView sections={sections} onEditSource={noop} onPatch={onPatch} />,
+    );
+    fireEvent.click(screen.getByText("Plain prose."));
+    const box = screen.getByLabelText("Edit paragraph");
+    fireEvent.change(box, { target: { value: "Edited by hand." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(onPatch).toHaveBeenCalledWith({
+        path: "sections/a.tex",
+        start: 47,
+        end: 57,
+        base: "hash-47",
+        text: "Edited by hand.",
+      } as FilePatch),
+    );
+    // A landed save closes the draft.
+    await waitFor(() =>
+      expect(
+        screen.queryByLabelText("Edit paragraph"),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("a bounced save keeps the draft open", async () => {
+    const onPatch = vi.fn().mockRejectedValue(new Error("409"));
+    render(
+      <ReadView sections={sections} onEditSource={noop} onPatch={onPatch} />,
+    );
+    fireEvent.click(screen.getByText("Plain prose."));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onPatch).toHaveBeenCalled());
+    expect(screen.getByLabelText("Edit paragraph")).toBeInTheDocument();
+  });
+
+  it("Discard closes the draft without a patch", () => {
+    const onPatch = vi.fn();
+    render(
+      <ReadView sections={sections} onEditSource={noop} onPatch={onPatch} />,
+    );
+    fireEvent.click(screen.getByText("Plain prose."));
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect(
+      screen.queryByLabelText("Edit paragraph"),
+    ).not.toBeInTheDocument();
+    expect(onPatch).not.toHaveBeenCalled();
+  });
+
+  it("a shifted block list cannot pair the draft with another span", async () => {
+    // The 3 s tick's refetch while a draft is open: an agent write
+    // earlier in the file shifted every later block. The draft must
+    // still post the seam it opened with — never the block now
+    // rendered at its old index.
+    const onPatch = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(
+      <ReadView sections={sections} onEditSource={noop} onPatch={onPatch} />,
+    );
+    fireEvent.click(screen.getByText("Plain prose."));
+    fireEvent.change(screen.getByLabelText("Edit paragraph"), {
+      target: { value: "Edited by hand." },
+    });
+    const shifted: DocSection[] = [
+      sections[0],
+      {
+        path: "sections/a.tex",
+        title: "A",
+        blocks: [
+          {
+            kind: "paragraph",
+            text: "An agent paragraph.",
+            ...span(0, true),
+          },
+          { kind: "heading", level: 1, text: "Section A", ...span(20, true) },
+        ],
+      },
+    ];
+    rerender(
+      <ReadView sections={shifted} onEditSource={noop} onPatch={onPatch} />,
+    );
+    // The draft survives the shift (orphaned at the section's end).
+    expect(screen.getByLabelText("Edit paragraph")).toHaveValue(
+      "Edited by hand.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(onPatch).toHaveBeenCalledWith({
+        path: "sections/a.tex",
+        start: 47,
+        end: 57,
+        base: "hash-47",
+        text: "Edited by hand.",
+      }),
+    );
+  });
+
+  it("a citation block offers the source, not a click-edit", () => {
+    const onEditSource = vi.fn();
+    render(
+      <ReadView
+        sections={sections}
+        onEditSource={onEditSource}
+        onPatch={noPatch}
+      />,
+    );
+    const para = screen.getByText("Prose with [Vaswani, 2017].");
+    fireEvent.click(para); // must not open a draft
+    expect(
+      screen.queryByLabelText("Edit paragraph"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(within(para).getByText("edit source"));
+    expect(onEditSource).toHaveBeenCalledWith("sections/a.tex");
+  });
+
+  it("lists, math and raw offer the source too", () => {
+    const onEditSource = vi.fn();
+    render(
+      <ReadView
+        sections={sections}
+        onEditSource={onEditSource}
+        onPatch={noPatch}
+      />,
+    );
+    const math = screen.getByText("\\[E=mc^2\\]");
+    fireEvent.click(math.nextElementSibling!); // its edit-source link
+    expect(onEditSource).toHaveBeenCalledWith("sections/a.tex");
+  });
+
+  it("every section carries an Edit source door", () => {
+    const onEditSource = vi.fn();
+    render(
+      <ReadView
+        sections={sections}
+        onEditSource={onEditSource}
+        onPatch={noPatch}
+      />,
+    );
+    const sec = screen
+      .getByText("Prose with [Vaswani, 2017].")
+      .closest("section")!;
+    fireEvent.click(within(sec).getByRole("button", { name: "Edit source" }));
+    expect(onEditSource).toHaveBeenCalledWith("sections/a.tex");
   });
 });

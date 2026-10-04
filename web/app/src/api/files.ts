@@ -1,7 +1,9 @@
 // The file doors (issue #28) for the active project: list (with the
 // linked/unlinked mark), upload (auto-\input at the end), soft-remove
-// into the server's trash, and restore. These are the user's own hand —
-// direct writes, no approval round-trip.
+// into the server's trash, restore — and the edit doors: content (the
+// source editor's load) and patch (both editors' save). These are the
+// user's own hand — direct writes, no approval round-trip.
+import type { FilePatch } from "../types";
 import { json } from "./http";
 
 export interface ProjectFile {
@@ -12,6 +14,12 @@ export interface ProjectFile {
 export interface FileList {
   files: ProjectFile[];
   trash: string[];
+}
+
+export interface FileContent {
+  path: string;
+  text: string;
+  hash: string;
 }
 
 export const listFiles = (): Promise<FileList> =>
@@ -39,3 +47,13 @@ export const removeFile = (path: string): Promise<{ removed: string }> =>
 
 export const restoreFile = (path: string): Promise<{ restored: string }> =>
   post("/project/files/restore", { path }).then(json<{ restored: string }>);
+
+export const fetchFileContent = (path: string): Promise<FileContent> =>
+  fetch(`/project/files/content?${new URLSearchParams({ path })}`).then(
+    json<FileContent>,
+  );
+
+// A stale base hash answers 409 ("changed since you opened it") — the
+// caller keeps the draft open and lets the user reload, never clobbers.
+export const patchFile = (p: FilePatch): Promise<{ path: string }> =>
+  post("/project/files/patch", p).then(json<{ path: string }>);

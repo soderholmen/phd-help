@@ -50,10 +50,57 @@ Download is a `Download ▾` dropdown in the header listing every project
 — grab any project without activating it (the project `select` can't
 double as the picker: its onChange activates).
 
+## Editing the paper
+
+The read view is not write-only. Every block carries its source span in
+the file (`start`/`end`), the hash of that region (`base`), and an
+`editable` verdict — so the paper can be edited from the prose side
+without ever round-tripping the lossy projection.
+
+- **Click-to-edit prose.** A block the kernel marked `editable` (its
+  source region is pure prose — no macro, cite, math, escape or comment)
+  opens an inline textarea on click; Save patches exactly its span.
+  Headings and captions span only their **brace argument**, so editing a
+  heading replaces the title, not the `\section{…}`. Everything else —
+  citations, lists, math, raw — shows an `edit source` link instead;
+  inventing a safe prose patch for a `\cite` region would destroy
+  markup, so the source editor is the honest surface there.
+- **Source editor.** Per-section (and per-block) `Edit source` opens the
+  raw `.tex` in a textarea; Save is the same patch door over the whole
+  file. The editor owns its text — staleness surfaces as the 409 below,
+  never as a silent overwrite.
+- **Offset truth.** The kernel's preprocessing (comments, preamble,
+  `\input` lines, `\end{document}` tail) **blanks in place** instead of
+  deleting, so scan indices are file indices and spans need no mapping
+  table.
+
+The doors: `GET /project/files/content?path=X` → `{path, text, hash}`;
+`POST /project/files/patch` `{path, start, end, base, text}` splices
+`text` over `[start, end)` — one door for both editors. If the region no
+longer hashes to `base` (the agent landed a diff since the fetch), the
+save **bounces 409** — "changed since you opened it — reload" — and the
+open draft stays open. That base-hash check is the whole conflict story;
+there is no collaborative locking.
+
+Known edge, stated: spans are Python **code-point** indices, and the
+browser speaks UTF-16 — a non-BMP character (emoji, rare CJK) in a
+`.tex` shifts every later span for the client. The failure mode is
+honest (a 400 on bounds or a 409 on base), never a corrupted splice;
+BMP text — including å/ä/ö — is unaffected.
+
+Ratified posture (issue #28): the user's own hand writes **directly** —
+no §5 approval card, no lint gate, same as uploads. Undo rides the
+agent's history: every patch records a `record_apply` snapshot, so
+`undo_last` reverts a hand edit exactly like an applied diff (there is
+no user-facing undo button yet).
+
 ## Verify
 
 ```powershell
 .venv/Scripts/python.exe -m pytest tests/test_readable.py tests/test_app.py -q
 # live: curl -sk https://127.0.0.1:8777/document
 #       curl -sk -o p.zip "https://127.0.0.1:8777/projects/download?name=<p>"
+#       curl -sk "https://127.0.0.1:8777/project/files/content?path=main.tex"
+#       curl -sk -X POST https://127.0.0.1:8777/project/files/patch \
+#         -d '{"path":"main.tex","start":0,"end":7,"base":"<hash>","text":"\\title{X}"}'
 ```

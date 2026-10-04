@@ -18,14 +18,22 @@ import {
   newProject,
 } from "./api/projects";
 import {
+  fetchFileContent,
   listFiles,
+  patchFile,
   removeFile,
   restoreFile,
   uploadFile,
   type ProjectFile,
 } from "./api/files";
 import { fetchDocument } from "./api/document";
-import type { CorpusDoc, DocSection, Health, SectionNode } from "./types";
+import type {
+  CorpusDoc,
+  DocSection,
+  FilePatch,
+  Health,
+  SectionNode,
+} from "./types";
 import { Header } from "./components/Header";
 import { SectionTree } from "./components/SectionTree";
 import { Transcript } from "./components/Transcript";
@@ -34,6 +42,7 @@ import { DiffCard } from "./components/DiffCard";
 import { CorpusPanel } from "./components/CorpusPanel";
 import { FilesPanel } from "./components/FilesPanel";
 import { ReadView } from "./components/ReadView";
+import { SourceEditor } from "./components/SourceEditor";
 
 export default function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
@@ -88,6 +97,14 @@ export default function App() {
   const [doc, setDoc] = useState<DocSection[]>([]);
   const readingRef = useRef(false);
   readingRef.current = reading;
+  // The source editor (issue: edit the paper): the loaded file plus
+  // the hash its bytes had at load — the patch door's clobber check.
+  // The editor owns its text; staleness surfaces as the 409 on save.
+  const [editing, setEditing] = useState<{
+    path: string;
+    text: string;
+    base: string;
+  } | null>(null);
 
   // One 3 s poll for tree + health + corpus status + projects + files:
   // indexing is async and must be visible (§6), and the agent can
@@ -232,6 +249,42 @@ export default function App() {
   const onDownload = (name: string) =>
     void downloadProject(name).catch(notice(`Download ${name}`));
 
+  // The edit doors: the user's own hand writes directly (ratified in
+  // #28 — no approval card, no lint gate; the base hash is the conflict
+  // story). A failed patch rethrows after the notice so the open draft
+  // stays open — a 409 must never look like a saved edit.
+  const refreshDoc = () =>
+    void fetchDocument()
+      .then((d) => setDoc(d.sections))
+      .catch(() => {});
+  const onEditSource = (path: string) =>
+    void fetchFileContent(path)
+      .then((f) => setEditing({ path: f.path, text: f.text, base: f.hash }))
+      .catch(notice(`Open ${path}`));
+  const patch = (p: FilePatch, label: string) =>
+    patchFile(p).catch((e: unknown) => {
+      notice(label)(e);
+      return Promise.reject(e); // the caller's draft stays open
+    });
+  const onPatch = (p: FilePatch) =>
+    patch(p, `Edit ${p.path}`).then(refreshDoc);
+  const onSaveSource = (draft: string) => {
+    if (!editing) return Promise.resolve();
+    return patch(
+      {
+        path: editing.path,
+        start: 0,
+        end: editing.text.length,
+        base: editing.base,
+        text: draft,
+      },
+      `Save ${editing.path}`,
+    ).then(() => {
+      setEditing(null);
+      refreshDoc();
+    });
+  };
+
   return (
     <div className="shell">
       <Header
@@ -256,21 +309,38 @@ export default function App() {
           <div className="view-toggle">
             <button
               className={reading ? "" : "on"}
-              onClick={() => setReading(false)}
+              onClick={() => {
+                setReading(false);
+                setEditing(null);
+              }}
               aria-pressed={!reading}
             >
               Talk
             </button>
             <button
               className={reading ? "on" : ""}
-              onClick={() => setReading(true)}
+              onClick={() => {
+                setReading(true);
+                setEditing(null);
+              }}
               aria-pressed={reading}
             >
               Read
             </button>
           </div>
-          {reading ? (
-            <ReadView sections={doc} />
+          {editing ? (
+            <SourceEditor
+              path={editing.path}
+              text={editing.text}
+              onSave={onSaveSource}
+              onCancel={() => setEditing(null)}
+            />
+          ) : reading ? (
+            <ReadView
+              sections={doc}
+              onEditSource={onEditSource}
+              onPatch={onPatch}
+            />
           ) : (
             <>
               <Transcript messages={state.messages} />

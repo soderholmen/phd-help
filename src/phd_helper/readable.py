@@ -8,6 +8,15 @@ in TRUE document order: depth-first over the section tree (a BFS walk
 would place a nested child after its parent's next sibling, which is not
 where LaTeX puts it).
 
+Every block carries its source span in the file ("start"/"end"), the
+hash of that region ("base") and an "editable" flag — the edit door's
+seam. Spans are honest because preprocessing BLANKS IN PLACE (comments,
+preamble, \\input lines become same-length whitespace, newlines kept):
+scan indices stay file indices, no mapping table. "editable" means the
+region is pure prose — its projection differs from its source only by
+whitespace collapse — so writing edited text back over the span cannot
+destroy a macro, cite or comment. Everything else is source-edit only.
+
 The never-drop contract (SPEC:141): anything the kernel does not
 understand — an unknown environment, \\ref, an unknown macro — passes
 through as source, visible. What is deliberately NOT shown: the
@@ -25,6 +34,7 @@ flattens every newline. The reading view keeps the content.
 import re
 
 from phd_helper.bibtex import parse_bib
+from phd_helper.patches import section_hash
 from phd_helper.sections import parse_section_tree
 
 _COMMENT = re.compile(r"(?<!\\)%.*")
@@ -50,6 +60,10 @@ _WRAPPER = re.compile(r"\\(?:textbf|emph|textit|texttt|textsf|underline"
                       r"|textsc|text)\*?\{([^{}]*)\}")
 _LISTS = {"itemize": False, "enumerate": True}
 _MATH_ENVS = ("equation", "align", "multline", "gather", "eqnarray")
+# A region holding any of these is not pure prose: its projection
+# changed something beyond whitespace, so prose cannot be written back
+# over it without destroying markup.
+_EDIT = re.compile(r"[\\$%&#_{}~]")
 
 
 def read_document(files: dict[str, str], root: str,
@@ -80,55 +94,95 @@ def to_blocks(text: str, bib: str = "") -> list[dict]:
     return _to_blocks(text, _labels(bib))
 
 
+def _blank(m: re.Match) -> str:
+    """Same-length whitespace, newlines kept: erasing content IN PLACE
+    keeps the scan's indices equal to the file's, so every block's span
+    is a real file offset."""
+    return re.sub(r"[^\n]", " ", m.group(0))
+
+
+def _span(orig: str, s: int, e: int, editable: bool = True) -> dict:
+    """The span quadruple every block carries: the file region and the
+    hash of it (the patch door's clobber check). `editable` is the
+    pure-prose rule: a region with a macro, cite, math or escape is
+    source-edit only, whatever the caller hoped."""
+    return {"start": s, "end": e, "base": section_hash(orig[s:e]),
+            "editable": editable and not _EDIT.search(orig, s, e)}
+
+
 def _to_blocks(text: str, labels: dict[str, str]) -> list[dict]:
-    code = _COMMENT.sub("", text)
+    code = _COMMENT.sub(_blank, text)
     out = []
-    body = code
+    body, body_at = code, 0
     if "\\begin{document}" in code:
-        pre, _, rest = code.partition("\\begin{document}")
-        body = rest.split("\\end{document}")[0]
-        m = _TITLE.search(pre)          # the preamble's one readable line
+        at = code.index("\\begin{document}") + len("\\begin{document}")
+        rest = code[at:]
+        stop = rest.find("\\end{document}")
+        body = rest if stop == -1 else rest[:stop]
+        body_at = at
+        m = _TITLE.search(code[:at])        # the preamble's one readable line
         if m:
-            arg, _ = _brace_arg(pre, m.end())
+            arg, end = _brace_arg(code, m.end())
             out.append({"kind": "heading", "level": 0,
-                        "text": _inline(arg, labels)})
-    body = body.replace("\\end{document}", "")
-    body = _INPUT.sub("", body)         # children ride as their own sections
-    out.extend(_scan(body, labels))
+                        "text": _inline(arg, labels),
+                        **_span(text, m.end(), end - 1,
+                                editable=False)})  # preamble: source-edit
+    body = _INPUT.sub(_blank, body)         # children ride as their own sections
+    body = re.sub(r"\\end\{document\}", _blank, body)
+    out.extend(_scan(body, labels, body_at, text))
     return out
 
 
-def _scan(body: str, labels: dict[str, str]) -> list[dict]:
+def _scan(body: str, labels: dict[str, str], at: int,
+          orig: str) -> list[dict]:
+    """Blocks over `body`, whose indices sit at `at` in `orig` (the real
+    file text): spans, base hashes and the editable rule all speak of
+    the original, never the blanked scan copy."""
     out: list[dict] = []
 
-    def flush(chunk: str) -> None:
-        for para in re.split(r"\n[ \t]*\n", chunk):
-            t = _inline(para, labels)
-            if t:
-                out.append({"kind": "paragraph", "text": t})
+    def emit(chunk: str, chunk_at: int) -> None:
+        t = _inline(chunk, labels)
+        if t:
+            # The span is the TRIMMED core: a patch replaces the text,
+            # never the newline that separated the paragraphs.
+            s = chunk_at + (len(chunk) - len(chunk.lstrip()))
+            e = chunk_at + len(chunk) - (len(chunk) - len(chunk.rstrip()))
+            out.append({"kind": "paragraph", "text": t,
+                        **_span(orig, s, e)})
+
+    def flush(chunk: str, chunk_at: int) -> None:
+        start = 0
+        for m in re.finditer(r"\n[ \t]*\n", chunk):
+            emit(chunk[start:m.start()], chunk_at + start)
+            start = m.end()
+        emit(chunk[start:], chunk_at + start)
 
     pos = 0
     while True:
         m = _TOKEN.search(body, pos)
         if m is None:
             break
-        flush(body[pos:m.start()])
+        flush(body[pos:m.start()], at + pos)
         if m.group(1) is not None:                     # environment
             name = m.group(1)
             end = _env_end(body, m.start(), name)
-            out.extend(_env_block(name, body[m.start():end], labels))
+            out.extend(_env_block(name, body[m.start():end], labels,
+                                  at + m.start(), orig))
             pos = end
         elif m.group(2) is not None or m.group(3) is not None:
-            out.append({"kind": "math",
-                        "text": m.group(0)})           # raw, as written
+            out.append({"kind": "math", "text": m.group(0),
+                        **_span(orig, at + m.start(), at + m.end(),
+                                editable=False)})     # raw, as written
             pos = m.end()
         else:                                          # heading
             arg, end = _brace_arg(body, m.end())
-            out.append({"kind": "heading",
-                        "level": _LEVEL[m.group(4)],
-                        "text": _inline(arg, labels)})
+            s, e = at + m.end(), at + end - 1         # the argument only:
+            out.append({"kind": "heading",             # edit replaces the
+                        "level": _LEVEL[m.group(4)],   # title, not the
+                        "text": _inline(arg, labels),  # \section wrapper
+                        **_span(orig, s, e)})
             pos = end
-    flush(body[pos:])
+    flush(body[pos:], at + pos)
     return out
 
 
@@ -146,30 +200,32 @@ def _env_end(body: str, begin_at: int, name: str) -> int:
     return len(body)
 
 
-def _env_block(name: str, src: str,
-               labels: dict[str, str]) -> list[dict]:
-    inner = _inner(src, name)
+def _env_block(name: str, src: str, labels: dict[str, str], at: int,
+               orig: str) -> list[dict]:
+    m0 = re.match(r"\\begin\*?\{" + re.escape(name) + r"\}", src)
+    inner_start = m0.end()
+    stop = src.rfind("\\end{" + name + "}")
+    inner = src[inner_start:] if stop == -1 else src[inner_start:stop]
+                                        # unterminated: keep every char
+    span = _span(orig, at, at + len(src),
+                 editable=False)        # whole-env spans: source-edit
     if name in _LISTS:
         items = [t for t in (_inline(s, labels)
                              for s in re.split(r"\\item\b", inner)[1:]) if t]
-        return [{"kind": "list", "ordered": _LISTS[name], "items": items}]
+        return [{"kind": "list", "ordered": _LISTS[name], "items": items,
+                 **span}]
     if name == "abstract":
-        return _scan(inner, labels)
+        return _scan(inner, labels, at + inner_start, orig)
     if name.rstrip("*") in _MATH_ENVS:
-        return [{"kind": "math", "text": inner.strip()}]
+        return [{"kind": "math", "text": inner.strip(), **span}]
     if name.rstrip("*") == "figure":     # figure* (two-column floats) too
         m = re.search(r"\\caption\s*\{", src)
         if m:
-            arg, _ = _brace_arg(src, m.end())
-            return [{"kind": "caption", "text": _inline(arg, labels)}]
-    return [{"kind": "raw", "text": src}]
-
-
-def _inner(src: str, name: str) -> str:
-    start = re.match(r"\\begin\*?\{" + re.escape(name) + r"\}", src).end()
-    end = src.rfind("\\end{" + name + "}")
-    return src[start:] if end == -1 else src[start:end]
-                                         # unterminated: keep every char
+            arg, end = _brace_arg(src, m.end())
+            s, e = at + m.end(), at + end - 1
+            return [{"kind": "caption", "text": _inline(arg, labels),
+                     **_span(orig, s, e)}]
+    return [{"kind": "raw", "text": src, **span}]
 
 
 def _brace_arg(text: str, open_at: int) -> tuple[str, int]:

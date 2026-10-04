@@ -28,6 +28,7 @@ from phd_helper.corpus import Corpus, CorpusError
 from phd_helper.endpoint import VoiceEndpoint
 from phd_helper.gists import body_sha, flatten, render_gists, stale_sections
 from phd_helper.ingest import IngestError, Ingestor
+from phd_helper.patches import AnchoredPatch, section_hash
 from phd_helper.project import Project
 from phd_helper.readable import read_document
 from phd_helper import sessionlog
@@ -1257,6 +1258,72 @@ def create_app(state: "AppState | None" = None,
         state.project.write_section(
             state.project.root_file, _wire_input(main, rel[: -len(".tex")]))
         return {"restored": rel}
+
+    # The edit doors: the read view's write path back. Same ratified
+    # posture as the other file doors (#28): the user's own hand writes
+    # directly — no §5 approval card, no lint gate (uploads aren't
+    # linted either). Safety is the §5 clobber idiom: every block
+    # carries the hash of its source region, and a patch whose base
+    # no longer matches bounces 409 so the client reloads instead of
+    # clobbering an agent write it never saw.
+
+    @app.get("/project/files/content")
+    async def project_file_content(path: str = ""):
+        # The source editor's load: raw bytes plus the hash a whole-
+        # file save must echo back.
+        rel = _safe_tex_relpath(path)
+        if rel is None:
+            return JSONResponse({"error": f"bad file path: {path}"},
+                                status_code=400)
+        target = state.project.root / rel
+        if not target.is_file():
+            return JSONResponse({"error": f"no such file: {rel}"},
+                                status_code=404)
+        text = target.read_text(encoding="utf-8")
+        return {"path": rel, "text": text, "hash": section_hash(text)}
+
+    @app.post("/project/files/patch")
+    async def project_file_patch(request: Request):
+        # One door for both editors: a prose edit sends a block's span
+        # and base; the source editor is the same call with start 0,
+        # end len and the whole file. The splice replaces exactly the
+        # span the user edited — nothing else moves.
+        body = await request.json()
+        rel = _safe_tex_relpath(str(body.get("path", "")))
+        if rel is None:
+            return JSONResponse({"error": "bad file path"},
+                                status_code=400)
+        target = state.project.root / rel
+        if not target.is_file():
+            return JSONResponse({"error": f"no such file: {rel}"},
+                                status_code=404)
+        try:
+            start, end = int(body["start"]), int(body["end"])
+        except (KeyError, TypeError, ValueError):
+            return JSONResponse({"error": "start/end must be integers"},
+                                status_code=400)
+        text = body.get("text")
+        base = body.get("base")
+        if not isinstance(text, str) or not isinstance(base, str):
+            return JSONResponse({"error": "text and base are required"},
+                                status_code=400)
+        current = target.read_text(encoding="utf-8")
+        if not (0 <= start <= end <= len(current)):
+            return JSONResponse({"error": "span outside the file"},
+                                status_code=400)
+        if section_hash(current[start:end]) != base:
+            return JSONResponse(
+                {"error": f"{rel} changed since you opened it — reload"},
+                status_code=409)
+        new = current[:start] + text + current[end:]
+        # record_apply, not bare snapshot: the meta JSON is what keeps
+        # undo_entry (and the agent's undo_last) working on this entry.
+        state.project.history.record_apply(
+            rel, current,
+            AnchoredPatch(find=current, replace=new,
+                          base_hash=section_hash(current)), new)
+        state.project.write_section(rel, new)
+        return {"path": rel}
 
     # -- corpus doors and status (SPEC §6): upload is door 1, the agent
     # fetch/auto-join is door 2; the UI reads status, never searches.

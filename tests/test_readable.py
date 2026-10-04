@@ -2,6 +2,7 @@
 simple server-side variant). Pure over a dict of project files, like
 sections.py; the never-drop contract is the property under test."""
 
+from phd_helper.patches import section_hash
 from phd_helper.readable import read_document, to_blocks
 
 BIB = (
@@ -243,3 +244,64 @@ def test_missing_root_reads_as_nothing_to_read():
     # blocks, not a KeyError from the tree walk.
     files = {"sections/a.tex": "\\section{A}\nA.\n"}
     assert read_document(files, "main.tex") == []
+
+
+# -- source spans (the edit door's seam) --------------------------------------
+
+
+def test_paragraph_spans_point_into_the_original_file():
+    # Blanking comments/preamble/\\input IN PLACE (never deleting) is
+    # what makes span == file offset true even after preprocessing.
+    src = ("\\begin{document}\n% a comment\nPlain prose here.\n"
+           "\\input{sections/a}\nAfter.\n\\end{document}\n")
+    blocks = to_blocks(src)
+    assert kinds(blocks) == ["paragraph", "paragraph"]
+    assert src[blocks[0]["start"]:blocks[0]["end"]] == "Plain prose here."
+    assert src[blocks[1]["start"]:blocks[1]["end"]] == "After."
+    assert blocks[0]["editable"] is True
+    assert blocks[0]["base"] == section_hash("Plain prose here.")
+
+
+def test_heading_span_is_the_argument_only():
+    # Editing a heading replaces its title, not the \\section wrapper.
+    src = "\\section{Deep Nets}\nProse.\n"
+    h = to_blocks(src)[0]
+    assert src[h["start"]:h["end"]] == "Deep Nets"
+    assert h["editable"] is True
+
+
+def test_heading_with_a_macro_is_source_edit_only():
+    h = to_blocks("\\section{The \\textbf{real} title}\n")[0]
+    assert h["editable"] is False
+
+
+def test_caption_span_is_the_argument_and_editable():
+    src = ("\\begin{figure}\n\\includegraphics{x}\n"
+           "\\caption{A nice plot.}\n\\end{figure}\n")
+    c = to_blocks(src)[0]
+    assert src[c["start"]:c["end"]] == "A nice plot."
+    assert c["editable"] is True
+
+
+def test_cite_and_math_blocks_are_not_editable():
+    # The projection is lossy on these — writing prose back would
+    # destroy the \\cite, so the source editor is their only surface.
+    blocks = to_blocks("Plain one.\n\nSee \\cite{x} here.\n")
+    assert blocks[0]["editable"] is True
+    assert blocks[1]["editable"] is False
+
+
+def test_env_blocks_span_their_source():
+    src = "\\begin{equation}\nx=1\n\\end{equation}\n"
+    b = to_blocks(src)[0]
+    assert src[b["start"]:b["end"]] == src.rstrip("\n")  # to the \end's }
+    assert b["editable"] is False
+
+
+def test_abstract_paragraph_spans_point_into_the_file():
+    # The sub-scan threads its base: spans stay file-relative inside
+    # nested scans, not relative to the environment slice.
+    src = "\\begin{abstract}\nWe study X.\n\\end{abstract}\n"
+    b = to_blocks(src)[0]
+    assert src[b["start"]:b["end"]] == "We study X."
+    assert b["editable"] is True

@@ -15,6 +15,7 @@ from phd_helper.corpus import Corpus
 from phd_helper.gists import body_sha
 from phd_helper.toolcall import ValidCall
 from phd_helper.endpoint import VoiceEndpoint
+from phd_helper.patches import section_hash
 from phd_helper.project import Project
 from phd_helper import sessionlog
 from phd_helper.saytext import for_speech, strip_fences
@@ -2346,8 +2347,11 @@ def test_document_returns_sections_in_document_order(tmp_path):
         doc = client.get("/document").json()
     paths = [s["path"] for s in doc["sections"]]
     assert paths == ["main.tex", "sections/intro.tex"]
-    assert doc["sections"][0]["blocks"][0] == {
-        "kind": "heading", "level": 0, "text": "My Paper"}
+    b0 = doc["sections"][0]["blocks"][0]
+    assert b0 == {"kind": "heading", "level": 0, "text": "My Paper",
+                  "start": 7, "end": 15,          # the \\title argument
+                  "base": section_hash("My Paper"),
+                  "editable": False}              # preamble: source-edit
     assert doc["sections"][1]["title"] == "Introduction"
     assert [b["kind"] for b in doc["sections"][1]["blocks"]] == [
         "heading", "paragraph"]
@@ -2389,6 +2393,96 @@ def test_document_degrades_around_an_unreadable_file(tmp_path):
     by_path = {s["path"]: s for s in r.json()["sections"]}
     assert by_path["sections/broken.tex"]["blocks"] == []
     assert by_path["sections/intro.tex"]["blocks"] != []
+
+
+def test_file_content_door(tmp_path):
+    state = ws_state(tmp_path)
+    text = (state.project.root / "sections" / "intro.tex").read_text(
+        encoding="utf-8")
+    with TestClient(create_app(state=state)) as client:
+        r = client.get("/project/files/content",
+                       params={"path": "sections/intro.tex"})
+        assert r.status_code == 200
+        assert r.json() == {"path": "sections/intro.tex", "text": text,
+                            "hash": section_hash(text)}
+        # .tex only (the _safe_tex_relpath rule), and the file must exist
+        assert client.get("/project/files/content",
+                          params={"path": "refs.bib"}).status_code == 400
+        assert client.get("/project/files/content",
+                          params={"path": "sections/ghost.tex"}
+                          ).status_code == 404
+
+
+def test_patch_door_splices_and_lands_in_history(tmp_path):
+    # The user's own hand: direct write, no approval card (ratified
+    # #28) — but snapshotted through record_apply, so the agent's undo
+    # reverts a hand edit like any other apply.
+    state = ws_state(tmp_path)
+    p = state.project.root / "sections" / "intro.tex"
+    text = p.read_text(encoding="utf-8")
+    i = text.index("Intro body prose.")
+    patch = {"path": "sections/intro.tex", "start": i,
+             "end": i + len("Intro body prose."),
+             "base": section_hash("Intro body prose."),
+             "text": "Edited by hand."}
+    with TestClient(create_app(state=state)) as client:
+        assert client.post("/project/files/patch",
+                           json=patch).status_code == 200
+    assert "Edited by hand." in p.read_text(encoding="utf-8")
+    assert state.project.undo_last("sections/intro.tex").applied
+    assert p.read_text(encoding="utf-8") == text
+
+
+def test_patch_door_whole_file_is_the_source_editor(tmp_path):
+    # The source editor is the same door: start 0, end len, whole text.
+    state = ws_state(tmp_path)
+    p = state.project.root / "sections" / "intro.tex"
+    text = p.read_text(encoding="utf-8")
+    with TestClient(create_app(state=state)) as client:
+        r = client.post("/project/files/patch", json={
+            "path": "sections/intro.tex", "start": 0, "end": len(text),
+            "base": section_hash(text),
+            "text": "\\section{Introduction}\nRewritten whole.\n"})
+    assert r.status_code == 200
+    assert "Rewritten whole." in p.read_text(encoding="utf-8")
+
+
+def test_patch_door_bounces_stale_base(tmp_path):
+    # The §5 clobber idiom at the user's door: the agent wrote since
+    # the block was fetched — the patch does not land, the client
+    # reloads and re-edits.
+    state = ws_state(tmp_path)
+    p = state.project.root / "sections" / "intro.tex"
+    patch = {"path": "sections/intro.tex", "start": 0, "end": 5,
+             "base": "0" * 64, "text": "clobber"}
+    with TestClient(create_app(state=state)) as client:
+        r = client.post("/project/files/patch", json=patch)
+    assert r.status_code == 409
+    assert "reload" in r.json()["error"]
+    assert "Intro body prose." in p.read_text(encoding="utf-8")  # untouched
+
+
+def test_patch_door_guards(tmp_path):
+    state = ws_state(tmp_path)
+    text = (state.project.root / "sections" / "intro.tex").read_text(
+        encoding="utf-8")
+    with TestClient(create_app(state=state)) as client:
+        assert client.post("/project/files/patch", json={
+            "path": "refs.bib", "start": 0, "end": 0,
+            "base": "x", "text": ""}).status_code == 400
+        assert client.post("/project/files/patch", json={
+            "path": "sections/ghost.tex", "start": 0, "end": 0,
+            "base": "x", "text": ""}).status_code == 404
+        assert client.post("/project/files/patch", json={
+            "path": "sections/intro.tex", "start": 5, "end": 2,
+            "base": section_hash(""), "text": ""}).status_code == 400
+        assert client.post("/project/files/patch", json={
+            "path": "sections/intro.tex", "start": 0,
+            "end": len(text) + 99, "base": section_hash(text),
+            "text": ""}).status_code == 400
+        assert client.post("/project/files/patch", json={
+            "path": "sections/intro.tex", "start": "x", "end": 2,
+            "base": "x", "text": ""}).status_code == 400
 
 
 def test_projects_download_zip(tmp_path):

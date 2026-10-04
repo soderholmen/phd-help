@@ -67,14 +67,37 @@ export interface SectionNode {
 
 // The read view from GET /document (readable.py blocks, SPEC §Section
 // view). The never-drop contract: math/raw blocks carry source text and
-// are shown as such — visible, never hidden.
-export type Block =
+// are shown as such — visible, never hidden. Every block also carries
+// its source span in the file and the hash of that region: the edit
+// door's seam. `editable` means the region is pure prose, so edited
+// text can be written back over the span without destroying markup.
+export interface BlockSpan {
+  start: number;
+  end: number;
+  base: string;
+  editable: boolean;
+}
+
+export type Block = (
   | { kind: "heading"; level: number; text: string }
   | { kind: "paragraph"; text: string }
   | { kind: "list"; ordered: boolean; items: string[] }
   | { kind: "math"; text: string }
   | { kind: "caption"; text: string }
-  | { kind: "raw"; text: string };
+  | { kind: "raw"; text: string }
+) &
+  BlockSpan;
+
+// One write to the patch door: replace [start, end) of `path` — whose
+// bytes must still hash to `base` — with `text`. The source editor is
+// the same shape over the whole file.
+export interface FilePatch {
+  path: string;
+  start: number;
+  end: number;
+  base: string;
+  text: string;
+}
 
 export interface DocSection {
   path: string;
