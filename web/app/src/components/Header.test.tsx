@@ -160,6 +160,18 @@ describe("Header", () => {
     expect(onPush).toHaveBeenCalledWith();
   });
 
+  it("Undo clicks straight through — no confirm dialog", () => {
+    const onUndo = vi.fn();
+    const prompt = vi.spyOn(window, "prompt");
+    const { unmount } = render(<Header {...base} {...noop} />);
+    expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
+    unmount();
+    render(<Header {...base} {...noop} onUndo={onUndo} />);
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    expect(onUndo).toHaveBeenCalled();
+    expect(prompt).not.toHaveBeenCalled(); // direct write, low blast radius
+  });
+
   it("the theme toggle appears only when wired, and flips on click", () => {
     const onToggleTheme = vi.fn();
     const { unmount } = render(<Header {...base} {...noop} />);

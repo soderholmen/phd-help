@@ -1345,6 +1345,24 @@ def create_app(state: "AppState | None" = None,
         state.project.write_section(rel, new)
         return {"path": rel}
 
+    @app.post("/project/undo")
+    async def project_undo():
+        # Undo the last change to the paper, whichever section it
+        # touched. Direct write, same posture as the patch door —
+        # SPEC:137: undo lands directly, no approval window. The
+        # kernel names what went back (refs.bib appends are NOT
+        # reverted, and the response says which section moved, so the
+        # toast can be honest). An empty history is a normal answer
+        # (200, mirrors the facade); a conflict — the inverse patch
+        # cannot re-anchor, or the file or its meta moved under us —
+        # is one to reload against (409), never a 500.
+        r = state.project.undo_last_change()
+        if "undone" not in r:
+            if r.get("empty"):
+                return {"applied": False, "reason": r["reason"]}
+            return JSONResponse({"error": r["reason"]}, status_code=409)
+        return {"applied": True, **r["undone"]}
+
     # -- corpus doors and status (SPEC §6): upload is door 1, the agent
     # fetch/auto-join is door 2; the UI reads status, never searches.
 

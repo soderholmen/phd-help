@@ -727,3 +727,40 @@ async def test_git_commit_fault_bounces_as_a_tool_error(paper):
     result = await execute_async(call("git_commit", {"message": "m"}), paper,
                                  git_run=run)
     assert "git commit failed" in result["error"]
+
+
+# -- undo_last (SPEC:137: undo lands directly, no approval window) --------
+
+def test_undo_last_is_offered_with_no_arguments():
+    assert OFFERED["undo_last"] == {}
+
+
+def test_undo_last_reverts_the_last_apply_and_names_it(paper):
+    paper.propose_patch("sections/intro.tex", "It works well.", "It works.")
+    diff = paper.pending.list_all()[0]
+    paper.apply_pending("sections/intro.tex", diff.id)
+
+    result = execute(call("undo_last", {}), paper)
+
+    assert result["status"] == "undone"
+    assert result["section"] == "sections/intro.tex"
+    assert "It works well." in result["undid"]
+    assert paper.read_section("sections/intro.tex") == INTRO
+
+
+def test_undo_last_says_so_when_history_is_empty(paper):
+    result = execute(call("undo_last", {}), paper)
+    assert "nothing to undo" in result["error"]
+
+
+def test_undo_last_twice_bounces_honestly(paper):
+    # The second undo targets the same (still-newest) entry; its inverse
+    # patch cannot re-anchor what is already undone. No redo, no crash.
+    paper.propose_patch("sections/intro.tex", "It works well.", "It works.")
+    diff = paper.pending.list_all()[0]
+    paper.apply_pending("sections/intro.tex", diff.id)
+    assert execute(call("undo_last", {}), paper)["status"] == "undone"
+
+    second = execute(call("undo_last", {}), paper)
+    assert "error" in second
+    assert paper.read_section("sections/intro.tex") == INTRO

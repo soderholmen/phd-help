@@ -1,9 +1,10 @@
 // Voice arming (explicit, never automatic — glossary: Conversation mode),
 // the input meter, the health chip (§8: state is known, not discovered
 // mid-turn), the project doors (#28): switch by name, scaffold a new
-// paper, import one as a zip, and the git doors: Commit (a prompt like
+// paper, import one as a zip, the git doors: Commit (a prompt like
 // New's) and Push (an on-screen gesture — it publishes outward, so
-// voice never owns it; the remote URL is pasted once per project).
+// voice never owns it; the remote URL is pasted once per project),
+// and Undo: the last change to the paper, direct, no confirm.
 // Switching ends the sitting server-side; the session_ended event
 // clears the old project's cards.
 //
@@ -32,6 +33,7 @@ interface Props {
   onDownload: (name: string) => void;
   onCommit: (message: string) => void;
   onPush: (remoteUrl?: string) => void;
+  onUndo?: () => void;
   onToggleTheme?: () => void;
 }
 
@@ -70,6 +72,7 @@ export function Header({
   onDownload,
   onCommit,
   onPush,
+  onUndo,
   onToggleTheme,
 }: Props) {
   const zipRef = useRef<HTMLInputElement | null>(null);
@@ -192,6 +195,14 @@ export function Header({
             ))}
           </ul>
         </details>
+        {/* Undo the last change to the paper (SPEC:137): a direct
+            write, no confirm — the blast radius is one section and
+            the door answers honestly when there is nothing to undo. */}
+        {onUndo && (
+          <button className="btn" onClick={onUndo}>
+            Undo
+          </button>
+        )}
         {chip && (
           <span
             className="git"

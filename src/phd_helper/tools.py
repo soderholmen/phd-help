@@ -199,6 +199,17 @@ TOOL_SCHEMAS = [
                                            "it"}},
             "required": ["message"],
             "additionalProperties": False}}},
+    {"type": "function", "function": {
+        "name": "undo_last",
+        "description": "Undo the last change to the paper, whichever "
+                       "section it touched, when the user says to undo "
+                       "or revert the last edit. A direct write — no "
+                       "approval card. It restores section text only: "
+                       "a citation entry added with the undone change "
+                       "stays in refs.bib.",
+        "parameters": {
+            "type": "object", "properties": {},
+            "required": [], "additionalProperties": False}}},
 ]
 
 # name -> {required param: json type} — validate_tool_calls checks both
@@ -359,6 +370,19 @@ def execute(call, project: Project, window: set[str] | None = None) -> dict:
         # approval gate — the §4 side panel is the user's edit surface.
         project.save_memory(call.args["content"])
         return {"status": "written", "chars": len(call.args["content"])}
+    if call.name == "undo_last":
+        # SPEC:137: undo lands directly, no approval window. The user's
+        # hand, #28 posture. A second undo of the same entry bounces
+        # honestly (the inverse patch can't re-anchor what is already
+        # undone) — the model says so; there is no redo.
+        r = project.undo_last_change()
+        if "undone" not in r:
+            return {"error": r["reason"]}
+        u = r["undone"]
+        return {"status": "undone", "section": u["section"],
+                "undid": f"{u['find']} → {u['replace']}",
+                "note": "the section is back to how it was before that "
+                        "change; refs.bib was not touched"}
     if call.name == "pending_decide":
         # §3 approval window: the agent interpreted the utterance against
         # the pending approval; this lands that interpretation through the

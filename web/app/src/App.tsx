@@ -20,6 +20,7 @@ import {
   importProject,
   listProjects,
   newProject,
+  undoLast,
   type GitStatus,
 } from "./api/projects";
 import {
@@ -300,6 +301,27 @@ export default function App() {
     }
   };
 
+  // Undo (SPEC:137): the door names the section it restored, and the
+  // toast says exactly that — honest about what went back (refs.bib
+  // is not reverted; the door's response is the truth we tell).
+  // No document_changed event: refreshDoc now + the 3 s tick is the
+  // freshness story, so the read view can lag a voice-side undo ≤3 s.
+  const onUndo = () =>
+    void undoLast()
+      .then((r) => {
+        dispatch({
+          type: "local_notice",
+          text: r.applied
+            ? `Undid the last change in ${r.section}`
+            : r.reason || "nothing to undo",
+        });
+        if (r.applied) {
+          refreshDoc();
+          refreshGit(); // the tree moved: the chip tells the truth now
+        }
+      })
+      .catch(notice("Undo"));
+
   // The edit doors: the user's own hand writes directly (ratified in
   // #28 — no approval card, no lint gate; the base hash is the conflict
   // story). A failed patch rethrows after the notice so the open draft
@@ -354,6 +376,7 @@ export default function App() {
         onDownload={onDownload}
         onCommit={onCommit}
         onPush={(url) => void onPush(url)}
+        onUndo={onUndo}
         onToggleTheme={toggleTheme}
       />
       <div className="panels">

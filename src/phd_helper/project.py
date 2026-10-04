@@ -334,3 +334,29 @@ class Project:
         if result.applied:
             self.write_section(path, result.text)
         return result
+
+    def undo_last_change(self) -> dict:
+        """Undo the last change to the paper, whichever section it
+        touched, and name what went back — the door's and the voice
+        tool's shared kernel, so both adapters stay thin. Exactly one
+        of "undone"/"reason": {"undone": {"section", "find",
+        "replace"}} (display-truncated) or {"reason": …, "empty": bool}
+        — `empty` separates "nothing to undo" (a normal answer, the
+        door's 200) from a conflict: the inverse patch cannot
+        re-anchor, or the file or its meta moved under us (the door's
+        409). (files() reads the bytes we don't need; the paper is
+        small and this is a user-triggered door, not a per-turn path.)"""
+        try:
+            found = self.history.latest_entry_across(
+                list(self._files(degrade=True)))
+            if found is None:
+                return {"reason": "nothing to undo", "empty": True}
+            path, sid = found
+            result = self.undo_entry(path, sid)
+            if not result.applied:
+                return {"reason": result.reason}
+            meta = self.history.entry_meta(path, sid)
+        except OSError as e:
+            return {"reason": f"undo failed: {e}"}
+        return {"undone": {"section": path, "find": meta["find"][:80],
+                           "replace": meta["replace"][:80]}}

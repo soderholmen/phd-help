@@ -1,7 +1,7 @@
 // The project doors (issue #28): list/switch, scaffold a new paper,
 // import one as a zip (a remote device cannot browse the server's
-// disk), and the git doors: every project a repo — status/commit/push,
-// with the remote URL stored once per project.
+// disk), the git doors: every project a repo — status/commit/push,
+// with the remote URL stored once per project — and the undo door.
 import { json, throwIfError } from "./http";
 
 export interface ProjectList {
@@ -84,3 +84,18 @@ export const gitPush = (): Promise<{ ok: boolean }> =>
 
 export const gitSetRemote = (url: string): Promise<{ ok: boolean }> =>
   post("/project/git/remote", { url }).then(json<{ ok: boolean }>);
+
+// The undo door: restores the last change to the paper, whichever
+// section it touched. An empty history is a normal answer (200,
+// applied:false), not an error; a re-anchor conflict is the 409 the
+// shared discipline throws with the server's reason.
+export interface UndoResult {
+  applied: boolean;
+  section?: string;
+  find?: string;
+  replace?: string;
+  reason?: string;
+}
+
+export const undoLast = (): Promise<UndoResult> =>
+  post("/project/undo").then(json<UndoResult>);

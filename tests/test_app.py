@@ -2494,6 +2494,61 @@ def test_patch_door_guards(tmp_path):
             "base": "x", "text": ""}).status_code == 400
 
 
+def test_undo_door_restores_the_newest_change_and_names_it(tmp_path):
+    # The Undo button's door: patch through the user's own door, then
+    # undo it project-wide. The response names the section and the
+    # change so the toast can be honest about what went back.
+    state = ws_state(tmp_path)
+    p = state.project.root / "sections" / "intro.tex"
+    text = p.read_text(encoding="utf-8")
+    i = text.index("Intro body prose.")
+    with TestClient(create_app(state=state)) as client:
+        assert client.post("/project/files/patch", json={
+            "path": "sections/intro.tex", "start": i,
+            "end": i + len("Intro body prose."),
+            "base": section_hash("Intro body prose."),
+            "text": "Edited by hand."}).status_code == 200
+        r = client.post("/project/undo")
+    assert r.status_code == 200
+    assert r.json()["applied"] is True
+    assert r.json()["section"] == "sections/intro.tex"
+    assert "Intro body prose." in r.json()["find"]
+    assert "Edited by hand." in r.json()["replace"]
+    assert p.read_text(encoding="utf-8") == text
+
+
+def test_undo_door_says_nothing_to_undo_on_a_fresh_project(tmp_path):
+    # Mirrors the facade, not a 404: an empty history is a normal
+    # answer, and the button toasts it rather than erroring.
+    state = ws_state(tmp_path)
+    with TestClient(create_app(state=state)) as client:
+        r = client.post("/project/undo")
+    assert r.status_code == 200
+    assert r.json() == {"applied": False, "reason": "nothing to undo"}
+
+
+def test_undo_door_bounces_conflict_when_the_entry_meta_moved(tmp_path):
+    # The kernel's OSError path: the snapshot's meta vanished under us
+    # (a pruned or half-written entry) — a conflict to reload against,
+    # never a 500.
+    state = ws_state(tmp_path)
+    text = (state.project.root / "sections" / "intro.tex").read_text(
+        encoding="utf-8")
+    i = text.index("Intro body prose.")
+    with TestClient(create_app(state=state)) as client:
+        assert client.post("/project/files/patch", json={
+            "path": "sections/intro.tex", "start": i,
+            "end": i + len("Intro body prose."),
+            "base": section_hash("Intro body prose."),
+            "text": "Edited by hand."}).status_code == 200
+        meta = (state.project.root / ".phd-helper" / "history"
+                / "sections__intro.tex" / "0000.json")
+        meta.unlink()
+        r = client.post("/project/undo")
+    assert r.status_code == 409
+    assert "undo failed" in r.json()["error"]
+
+
 def test_projects_download_zip(tmp_path):
     import io
     import zipfile

@@ -57,6 +57,15 @@ class SectionHistory:
         )
         return sid
 
+    def entry_meta(self, section_path: str, entry_id: str) -> dict:
+        """What the apply did (find/replace/base_hash/applied_text) —
+        the undo door and the voice tool name the change with it."""
+        return json.loads(
+            (self._dir(section_path) / f"{entry_id}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
     def undo_entry(
         self, section_path: str, entry_id: str, current_text: str
     ) -> ApplyResult:
@@ -84,3 +93,23 @@ class SectionHistory:
             SnapshotEntry(id=p.stem)
             for p in sorted(d.glob("*.tex"), reverse=True)
         ]
+
+    def latest_entry_across(
+        self, section_paths: list[str]
+    ) -> tuple[str, str] | None:
+        """The newest entry over the given sections — the undo door's
+        \"last change to the paper\". sid is a per-section counter and
+        meta has no timestamp, so mtime is the only cross-section order
+        (single-machine reality; Syncthing mtime drift is the known
+        caveat). Returns (section_path, sid), or None when no section
+        has history."""
+        best: tuple[float, str, str] | None = None
+        for path in section_paths:
+            entries = self.entries(path)
+            if not entries:
+                continue
+            sid = entries[0].id  # newest first
+            mtime = (self._dir(path) / f"{sid}.tex").stat().st_mtime
+            if best is None or mtime > best[0]:
+                best = (mtime, path, sid)
+        return None if best is None else (best[1], best[2])
