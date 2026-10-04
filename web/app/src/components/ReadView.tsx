@@ -1,9 +1,11 @@
 // The read view (SPEC §Section view, simple server-side variant): the
 // server's readable blocks rendered as prose. The never-drop contract
-// means every block is content — math and raw blocks show their source
-// in monospace, visibly, because unrendered beats dropped. This is the
-// paper, not a proposal: DiffCard's "diffs are never rendered" stance
-// is untouched.
+// means every block is content — math renders through KaTeX with its
+// raw source kept in the DOM behind the view (CSS hides it only when a
+// view precedes it, and unparseable math has no view: unrendered beats
+// dropped), and raw blocks show their source in monospace, visibly.
+// This is the paper, not a proposal: DiffCard's "diffs are never
+// rendered" stance is untouched.
 //
 // Editing: a block the kernel marked `editable` (pure-prose source) is
 // click-to-edit. The open draft lives here, keyed by (path, start),
@@ -14,7 +16,9 @@
 // Everything else edits through the source editor: per-block and
 // per-section affordances both open it.
 import { useState } from "react";
-import type { KeyboardEvent } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
+import katex from "katex";
+import "katex/dist/katex.min.css";
 import type { Block, DocSection, FilePatch } from "../types";
 
 interface Props {
@@ -85,6 +89,67 @@ function SourceLink({ onEditSource }: { onEditSource: () => void }) {
   );
 }
 
+// One KaTeX door for both surfaces: parse-or-null, never a throw.
+// A null is the never-drop signal — the caller keeps the raw source.
+function renderMath(tex: string, display: boolean): string | null {
+  try {
+    return katex.renderToString(tex, {
+      displayMode: display,
+      throwOnError: true,
+    });
+  } catch {
+    return null;
+  }
+}
+
+// The kernel keeps \$ literal in EVERY inline text (readable.py), so
+// surfaces that do no math splitting still show it as a plain dollar.
+const lit = (text: string) => text.replace(/\\\$/g, "$");
+
+// Display math: \[..\] and $$..$$ arrive WITH their delimiters (the
+// kernel keeps them as written); equation/align arrive as inner text.
+// KaTeX wants the body alone. On a parse error there is no view at
+// all — the raw pre stays visible, which is the never-drop shape.
+function MathView({ text }: { text: string }) {
+  let tex = text;
+  if (tex.startsWith("\\[") && tex.endsWith("\\]")) tex = tex.slice(2, -2);
+  else if (tex.startsWith("$$") && tex.endsWith("$$")) tex = tex.slice(2, -2);
+  const html = renderMath(tex, true);
+  return (
+    <>
+      {html !== null && (
+        <div className="math-view" dangerouslySetInnerHTML={{ __html: html }} />
+      )}
+      <pre className="math">{text}</pre>
+    </>
+  );
+}
+
+// Unescaped $…$ is inline math; a \$ is money (see lit). A pair KaTeX
+// cannot parse renders as written — never-drop again, locally.
+const INLINE_MATH = /(?<!\\)\$([^$]+?)(?<!\\)\$/g;
+
+function prose(text: string): ReactNode[] {
+  const out: ReactNode[] = [];
+  let last = 0;
+  for (const m of text.matchAll(INLINE_MATH)) {
+    const at = m.index ?? 0;
+    if (at > last) out.push(lit(text.slice(last, at)));
+    const html = renderMath(m[1], false);
+    out.push(
+      html === null ? (
+        <span key={out.length}>{m[0]}</span>
+      ) : (
+        <span key={out.length} dangerouslySetInnerHTML={{ __html: html }} />
+      ),
+    );
+    last = at + m[0].length;
+  }
+  if (out.length === 0) return [lit(text)];
+  if (last < text.length) out.push(lit(text.slice(last)));
+  return out;
+}
+
 function BlockView({
   b,
   path,
@@ -146,7 +211,7 @@ function BlockView({
       const Tag = `h${level}` as "h1" | "h2" | "h3";
       return (
         <Tag onClick={open} {...keys} className={cls}>
-          {b.text}
+          {lit(b.text)}
           {src}
         </Tag>
       );
@@ -154,7 +219,7 @@ function BlockView({
     case "paragraph":
       return (
         <p onClick={open} {...keys} className={cls}>
-          {b.text}
+          {prose(b.text)}
           {src}
         </p>
       );
@@ -164,7 +229,7 @@ function BlockView({
         <>
           <Tag>
             {b.items.map((it, i) => (
-              <li key={i}>{it}</li>
+              <li key={i}>{lit(it)}</li>
             ))}
           </Tag>
           {src}
@@ -174,7 +239,7 @@ function BlockView({
     case "math":
       return (
         <>
-          <pre className="math">{b.text}</pre>
+          <MathView text={b.text} />
           {src}
         </>
       );
@@ -182,7 +247,7 @@ function BlockView({
       return (
         <figure>
           <figcaption onClick={open} {...keys} className={cls}>
-            {b.text}
+            {lit(b.text)}
           </figcaption>
           {src}
         </figure>

@@ -23,8 +23,9 @@ through as source, visible. What is deliberately NOT shown: the
 preamble (setup, not content; \\title excepted) and a figure's
 \\includegraphics line (the image is not a project file; its caption is
 the text). Tables stay raw: their rows are content, and raw rows beat
-dropped ones. Inline math stays inline and raw — the KaTeX door is open,
-this slice ships no renderer.
+dropped ones. Inline math stays inline in the paragraph text (the
+client renders it with KaTeX); a literal dollar rides as \$ so the
+client can tell the two apart.
 
 for_speech (saytext.py) is the voice's lossy paraphrase and is NOT
 reusable here: it replaces math and citations with placeholder words and
@@ -268,7 +269,11 @@ def _unescape(m) -> str:
         return ". "        # \cite{X}. — the abbreviation-space period
     if c in ",;: ":
         return " "         # LaTeX spacing commands
-    return c               # \% \$ \_ \& \# \{ \} -> the literal
+    if c == "$":
+        return "\\$"       # stays escaped: the client splits unescaped
+                           # $…$ into KaTeX spans, so a literal dollar
+                           # must stay distinguishable from a delimiter
+    return c               # \% \_ \& \# \{ \} -> the literal
 
 
 def _inline(text: str, labels: dict[str, str]) -> str:

@@ -90,6 +90,86 @@ describe("ReadView", () => {
     );
   });
 
+  it("block math renders a KaTeX view above the raw source", () => {
+    const { container } = render(
+      <ReadView sections={sections} onEditSource={noop} onPatch={noPatch} />,
+    );
+    const view = container.querySelector(".math-view")!;
+    // Delimiters stripped for displayMode: the annotation carries the
+    // TeX KaTeX actually parsed.
+    expect(view.querySelector("annotation")?.textContent).toBe("E=mc^2");
+    // The raw pre stays in the DOM (never-drop): CSS hides it only
+    // when a view precedes it, and jsdom proves the chain survives.
+    expect(view.nextElementSibling?.textContent).toBe("\\[E=mc^2\\]");
+  });
+
+  it("unparseable math falls back to the visible raw pre", () => {
+    const broken: DocSection[] = [
+      {
+        path: "sections/b.tex",
+        title: "B",
+        blocks: [
+          { kind: "math", text: "\\[\\unknownmacro{x}\\]", ...span(5, false) },
+        ],
+      },
+    ];
+    const { container } = render(
+      <ReadView sections={broken} onEditSource={noop} onPatch={noPatch} />,
+    );
+    expect(container.querySelector(".math-view")).toBeNull();
+    expect(screen.getByText("\\[\\unknownmacro{x}\\]")).toBeInTheDocument();
+  });
+
+  it("inline math in a paragraph renders KaTeX spans", () => {
+    const inline: DocSection[] = [
+      {
+        path: "sections/c.tex",
+        title: "C",
+        blocks: [
+          {
+            kind: "paragraph",
+            text: "Cost $E=mc^2$ here, not \\$5.",
+            ...span(7, false),
+          },
+        ],
+      },
+    ];
+    const { container } = render(
+      <ReadView sections={inline} onEditSource={noop} onPatch={noPatch} />,
+    );
+    const p = container.querySelector("p")!;
+    expect(p.querySelector(".katex")).not.toBeNull();
+    // The prose around the math survives, and the literal dollar
+    // unescapes — it is money, not a delimiter.
+    expect(p.textContent).toContain("Cost ");
+    expect(p.textContent).toContain(" here, not $5.");
+  });
+
+  it("a literal dollar renders as a dollar wherever math is not split", () => {
+    // The kernel keeps \$ literal for every inline text, not just
+    // paragraphs — so heading/list/caption, which do no math splitting,
+    // must still unescape it (a backslash there is the regression).
+    const dollars: DocSection[] = [
+      {
+        path: "sections/d.tex",
+        title: "D",
+        blocks: [
+          { kind: "heading", level: 1, text: "Cost \\$5 today", ...span(4, true) },
+          { kind: "list", ordered: false, items: ["about \\$5"], ...span(12, false) },
+          { kind: "caption", text: "Roughly \\$5.", ...span(20, true) },
+        ],
+      },
+    ];
+    render(
+      <ReadView sections={dollars} onEditSource={noop} onPatch={noPatch} />,
+    );
+    expect(
+      screen.getByRole("heading", { name: "Cost $5 today" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("about $5")).toBeInTheDocument();
+    expect(screen.getByText("Roughly $5.")).toBeInTheDocument();
+  });
+
   it("an empty document says so", () => {
     render(
       <ReadView sections={[]} onEditSource={noop} onPatch={noPatch} />,

@@ -6,17 +6,22 @@ SPEC §Section view specifies a rendered, read-only Read view with a
 client-side LaTeX→HTML renderer and KaTeX. This slice is the **simple
 server-side variant** the user chose instead: a pure-Python converter
 (`readable.py`, unit-tested like the other pure kernels) and
-`GET /document` returning JSON blocks — no new dependencies in either
-package, and the door stays open for the full SPEC view later (a KaTeX
-renderer would consume the same block JSON).
+`GET /document` returning JSON blocks. The door the variant left open
+was later walked through: the client renders math with KaTeX over the
+same block JSON (see the Math bullet).
 
 Honest deviations from SPEC §Section view, stated not hidden:
 
 - **Server-side conversion, not client-side** (SPEC:145 "one client-side
   renderer, no server render endpoint"). The blocks cross the wire as
   data; the client maps them to elements with no parsing logic.
-- **Math is raw, not KaTeX.** Display math lands in monospace `pre`
-  blocks exactly as written; inline math stays inline and raw.
+- **Math renders with KaTeX; the raw source stays behind it.** Display
+  math gets a rendered view before its monospace `pre` (CSS hides the
+  pre only when a view precedes it); unparseable math has no view, so
+  its source stays visible — never-drop again, locally. Inline `$…$`
+  in paragraphs renders as KaTeX spans; the kernel keeps a literal
+  dollar escaped as `\$` so the client can tell the two apart
+  (paragraphs carrying `$` are prose-uneditable either way).
 - **`\cite` → `[Surname, year]`** via the deterministic refs.bib lookup
   (SPEC's rule, kept); unknown keys show the key. `\ref`/`\eqref` and
   unknown macros stay raw (SPEC's raw list, kept).
@@ -91,8 +96,9 @@ BMP text — including å/ä/ö — is unaffected.
 Ratified posture (issue #28): the user's own hand writes **directly** —
 no §5 approval card, no lint gate, same as uploads. Undo rides the
 agent's history: every patch records a `record_apply` snapshot, so
-`undo_last` reverts a hand edit exactly like an applied diff (there is
-no user-facing undo button yet).
+`undo_last` reverts a hand edit exactly like an applied diff — and the
+header's Undo button and the `undo_last` voice tool ride the same
+history (see the undo door, `POST /project/undo`).
 
 ## Verify
 

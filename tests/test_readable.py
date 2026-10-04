@@ -204,9 +204,16 @@ def test_refs_stay_raw_per_spec():
     assert "\\eqref{eq:loss}" in blocks[0]["text"]
 
 
-def test_escapes_become_their_literal():
+def test_escapes_become_their_literal_except_dollars():
+    # Deliberate carve-out (the KaTeX slice): \$ stays escaped so the
+    # read view's client can tell a literal dollar from an inline-math
+    # delimiter — it splits unescaped $…$ into rendered spans and
+    # unescapes \$ back in the prose between them. Every other escape
+    # becomes its literal.
     blocks = to_blocks("We hit 50\\% of \\_tasks\\.\n")
     assert blocks[0]["text"] == "We hit 50% of _tasks."
+    blocks = to_blocks("It costs \\$5, and $x^2$ holds.\n")
+    assert blocks[0]["text"] == "It costs \\$5, and $x^2$ holds."
 
 
 def test_unknown_macros_stay_raw_never_dropped():

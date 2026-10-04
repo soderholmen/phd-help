@@ -359,6 +359,16 @@ button { font: inherit; color: inherit; }
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
 }
+/* KaTeX renders in currentColor, so both themes paint it for free;
+   a wide equation scrolls instead of breaking the measure. The raw
+   pre stays in the DOM (never-drop + the edit-source chain) and is
+   hidden only when a rendered view precedes it — unparseable math
+   has no view, so its source stays visible. */
+.read .math-view {
+  margin: var(--sp-2) 0;
+  overflow-x: auto;
+}
+.read .math-view + pre.math { display: none; }
 /* Editing: a wash on hover/focus says "this paragraph is yours",
    the pencil (CSS content — invisible to textContent, so the tests
    and screen readers still read the prose as-is) says it again. */
