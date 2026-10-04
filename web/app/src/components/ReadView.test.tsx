@@ -226,6 +226,49 @@ describe("ReadView", () => {
     expect(onEditSource).toHaveBeenCalledWith("sections/a.tex");
   });
 
+  it("Enter on a focused editable paragraph opens the draft", () => {
+    // keyboard access without a role override: the heading stays a
+    // heading, the paragraph stays a paragraph — tabIndex + keys.
+    render(
+      <ReadView sections={sections} onEditSource={noop} onPatch={noPatch} />,
+    );
+    fireEvent.keyDown(screen.getByText("Plain prose."), { key: "Enter" });
+    expect(screen.getByLabelText("Edit paragraph")).toBeInTheDocument();
+  });
+
+  it("the draft takes focus the moment it opens", () => {
+    render(
+      <ReadView sections={sections} onEditSource={noop} onPatch={noPatch} />,
+    );
+    fireEvent.click(screen.getByText("Plain prose."));
+    expect(document.activeElement).toBe(screen.getByLabelText("Edit paragraph"));
+  });
+
+  it("Escape closes an untouched draft; a typed one survives it", () => {
+    render(
+      <ReadView sections={sections} onEditSource={noop} onPatch={noPatch} />,
+    );
+    fireEvent.click(screen.getByText("Plain prose."));
+    fireEvent.keyDown(screen.getByLabelText("Edit paragraph"), {
+      key: "Escape",
+    });
+    expect(
+      screen.queryByLabelText("Edit paragraph"),
+    ).not.toBeInTheDocument();
+    // dirty: Escape must not silently eat the user's typing — only
+    // Discard closes a draft that differs from the block.
+    fireEvent.click(screen.getByText("Plain prose."));
+    fireEvent.change(screen.getByLabelText("Edit paragraph"), {
+      target: { value: "half-typed thought" },
+    });
+    fireEvent.keyDown(screen.getByLabelText("Edit paragraph"), {
+      key: "Escape",
+    });
+    expect(screen.getByLabelText("Edit paragraph")).toHaveValue(
+      "half-typed thought",
+    );
+  });
+
   it("every section carries an Edit source door", () => {
     const onEditSource = vi.fn();
     render(

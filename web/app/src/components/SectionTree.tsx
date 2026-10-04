@@ -4,17 +4,18 @@ import type { SectionNode } from "../types";
 
 interface NodeProps {
   node: SectionNode;
-  depth: number;
   selected: string | null;
   onSelect: (path: string) => void;
 }
 
-function Node({ node, depth, selected, onSelect }: NodeProps) {
+function Node({ node, selected, onSelect }: NodeProps) {
+  // Indent is the nested ul's own margin (CSS), not per-node padding:
+  // the text stays a direct child of the button, and the guide line
+  // lands under the parent's label for free.
   return (
     <li>
       <button
         className="tree-node"
-        style={{ paddingLeft: `${0.5 + depth * 0.9}rem` }}
         aria-current={selected === node.path ? "true" : undefined}
         onClick={() => onSelect(node.path)}
       >
@@ -23,7 +24,7 @@ function Node({ node, depth, selected, onSelect }: NodeProps) {
       {node.children.length > 0 && (
         <ul>
           {node.children.map((c) => (
-            <Node key={c.path} node={c} depth={depth + 1} selected={selected} onSelect={onSelect} />
+            <Node key={c.path} node={c} selected={selected} onSelect={onSelect} />
           ))}
         </ul>
       )}
@@ -45,11 +46,15 @@ export function SectionTree({ tree, selected, onSelect }: Props) {
           Clear anchor ({selected})
         </button>
       )}
-      <ul>
-        {tree.map((n) => (
-          <Node key={n.path} node={n} depth={0} selected={selected} onSelect={onSelect} />
-        ))}
-      </ul>
+      {tree.length === 0 ? (
+        <p className="tree-empty">no sections yet</p>
+      ) : (
+        <ul>
+          {tree.map((n) => (
+            <Node key={n.path} node={n} selected={selected} onSelect={onSelect} />
+          ))}
+        </ul>
+      )}
     </nav>
   );
 }

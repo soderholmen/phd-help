@@ -6,9 +6,15 @@
 // voice never owns it; the remote URL is pasted once per project).
 // Switching ends the sitting server-side; the session_ended event
 // clears the old project's cards.
+//
+// The bar is two segments — voice state left, project/git actions
+// right, hairline between — and it wraps on narrow screens. The theme
+// toggle is optional props: tests render the bar without it.
 import { useRef } from "react";
+import type { CSSProperties } from "react";
 import type { Health } from "../types";
 import type { GitStatus } from "../api/projects";
+import type { Theme } from "../useTheme";
 
 interface Props {
   connected: boolean;
@@ -18,6 +24,7 @@ interface Props {
   projects: string[];
   active: string;
   gitStatus: GitStatus | null;
+  theme?: Theme;
   onToggleVoice: () => void;
   onActivate: (name: string) => void;
   onNew: (name: string) => void;
@@ -25,6 +32,26 @@ interface Props {
   onDownload: (name: string) => void;
   onCommit: (message: string) => void;
   onPush: (remoteUrl?: string) => void;
+  onToggleTheme?: () => void;
+}
+
+// currentColor icons: the theme paints them, no second asset.
+function SunIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+    </svg>
+  );
+}
+
+function MoonIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" />
+    </svg>
+  );
 }
 
 export function Header({
@@ -35,6 +62,7 @@ export function Header({
   projects,
   active,
   gitStatus,
+  theme,
   onToggleVoice,
   onActivate,
   onNew,
@@ -42,6 +70,7 @@ export function Header({
   onDownload,
   onCommit,
   onPush,
+  onToggleTheme,
 }: Props) {
   const zipRef = useRef<HTMLInputElement | null>(null);
 
@@ -90,27 +119,33 @@ export function Header({
 
   return (
     <header className="bar">
-      <button
-        id="toggle"
-        className={armed ? "on" : ""}
-        onClick={onToggleVoice}
-        aria-pressed={armed}
-      >
-        Voice: {armed ? "ON" : "OFF"}
-      </button>
-      <div className="meter" title="input level">
-        <div style={{ width: `${Math.min(100, rms * 400)}%` }} />
-      </div>
-      <span className={`conn ${connected ? "up" : "down"}`}>
-        {connected ? "connected" : "reconnecting…"}
-      </span>
-      {health && (
-        <span className="health" title="component health (§8)">
-          llm:{health.vllm} corpus:{health.corpus}
+      <span className="seg">
+        <button
+          className={armed ? "btn btn-primary" : "btn"}
+          onClick={onToggleVoice}
+          aria-pressed={armed}
+        >
+          Voice: {armed ? "ON" : "OFF"}
+        </button>
+        <div
+          className="meter"
+          title="input level"
+          style={{ "--rms": Math.min(100, rms * 400) } as CSSProperties}
+        >
+          <div />
+        </div>
+        <span className={`conn ${connected ? "up" : "down"}`}>
+          {connected ? "connected" : "reconnecting…"}
         </span>
-      )}
-      <span className="projects">
+        {health && (
+          <span className="chip health" title="component health (§8)">
+            llm:{health.vllm} corpus:{health.corpus}
+          </span>
+        )}
+      </span>
+      <span className="seg projects">
         <select
+          className="input"
           aria-label="Project"
           value={active}
           onChange={(e) => onActivate(e.target.value)}
@@ -122,6 +157,7 @@ export function Header({
           ))}
         </select>
         <button
+          className="btn"
           onClick={() => {
             const name = window.prompt("New project name");
             if (name?.trim()) onNew(name.trim());
@@ -129,7 +165,9 @@ export function Header({
         >
           New
         </button>
-        <button onClick={() => zipRef.current?.click()}>Import</button>
+        <button className="btn" onClick={() => zipRef.current?.click()}>
+          Import
+        </button>
         <input
           ref={zipRef}
           type="file"
@@ -164,7 +202,7 @@ export function Header({
                 : "no commits yet")
             }
           >
-            <span className={`git-chip ${dirty ? "dirty" : ""}`}>
+            <span className={dirty ? "chip git-chip dirty" : "chip git-chip"}>
               {chip}
             </span>
             {gitStatus?.initialized && !gitStatus.error && (
@@ -181,8 +219,25 @@ export function Header({
             )}
           </span>
         )}
-        <button onClick={commit}>Commit</button>
-        <button onClick={push}>Push</button>
+        <button className="btn" onClick={commit}>
+          Commit
+        </button>
+        <button className="btn" onClick={push}>
+          Push
+        </button>
+        {onToggleTheme && (
+          <button
+            className="btn btn-ghost theme-toggle"
+            onClick={onToggleTheme}
+            aria-label={
+              theme === "dark"
+                ? "Switch to light theme"
+                : "Switch to dark theme"
+            }
+          >
+            {theme === "dark" ? <SunIcon /> : <MoonIcon />}
+          </button>
+        )}
       </span>
     </header>
   );

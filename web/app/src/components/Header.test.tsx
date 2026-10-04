@@ -160,6 +160,25 @@ describe("Header", () => {
     expect(onPush).toHaveBeenCalledWith();
   });
 
+  it("the theme toggle appears only when wired, and flips on click", () => {
+    const onToggleTheme = vi.fn();
+    const { unmount } = render(<Header {...base} {...noop} />);
+    expect(
+      screen.queryByRole("button", { name: /theme/i }),
+    ).toBeNull(); // unwired (tests, embeds): no dead button
+    unmount();
+    render(
+      <Header
+        {...base}
+        {...noop}
+        theme="dark"
+        onToggleTheme={onToggleTheme}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /theme/i }));
+    expect(onToggleTheme).toHaveBeenCalled();
+  });
+
   it("Push cancelled at the URL prompt pushes nothing", () => {
     const onPush = vi.fn();
     vi.spyOn(window, "prompt").mockReturnValue(null);

@@ -48,6 +48,8 @@ import { CorpusPanel } from "./components/CorpusPanel";
 import { FilesPanel } from "./components/FilesPanel";
 import { ReadView } from "./components/ReadView";
 import { SourceEditor } from "./components/SourceEditor";
+import { Toasts, type Toast } from "./components/Toasts";
+import { useTheme } from "./useTheme";
 
 export default function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
@@ -114,6 +116,26 @@ export default function App() {
     text: string;
     base: string;
   } | null>(null);
+  const [theme, toggleTheme] = useTheme();
+  // The toast: the newest notice/error floats above EVERY view — in
+  // Read/Source the transcript is unmounted, and a notice nobody can
+  // see is §8's failure mode. The transcript keeps the record (and
+  // its aria-live); the ref guard means one toast per message, not
+  // one per render.
+  const [toast, setToast] = useState<Toast | null>(null);
+  const toastId = useRef(-1);
+  useEffect(() => {
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      const m = state.messages[i];
+      if (m.role === "notice" || m.role === "error") {
+        if (m.id !== toastId.current) {
+          toastId.current = m.id;
+          setToast({ id: m.id, kind: m.role, text: m.text });
+        }
+        break;
+      }
+    }
+  }, [state.messages]);
 
   // One 3 s poll for tree + health + corpus status + projects + files:
   // indexing is async and must be visible (§6), and the agent can
@@ -324,6 +346,7 @@ export default function App() {
         projects={projects}
         active={active}
         gitStatus={git}
+        theme={theme}
         onToggleVoice={() => void toggleVoice()}
         onActivate={onActivate}
         onNew={onNew}
@@ -331,6 +354,7 @@ export default function App() {
         onDownload={onDownload}
         onCommit={onCommit}
         onPush={(url) => void onPush(url)}
+        onToggleTheme={toggleTheme}
       />
       <div className="panels">
         <aside className="left">
@@ -340,7 +364,6 @@ export default function App() {
         <main className="center">
           <div className="view-toggle">
             <button
-              className={reading ? "" : "on"}
               onClick={() => {
                 setReading(false);
                 setEditing(null);
@@ -350,7 +373,6 @@ export default function App() {
               Talk
             </button>
             <button
-              className={reading ? "on" : ""}
               onClick={() => {
                 setReading(true);
                 setEditing(null);
@@ -408,6 +430,7 @@ export default function App() {
           />
         </aside>
       </div>
+      <Toasts toast={toast} onDismiss={() => setToast(null)} />
     </div>
   );
 }

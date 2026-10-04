@@ -55,18 +55,18 @@ export function CorpusPanel({ docs, onUpload, onRetry, onPin, onUnpin }: Props) 
           onChange={(e) => setFile(e.target.files?.[0] ?? null)}
         />
         <input
-          className="meta"
+          className="input meta"
           placeholder="title (optional)"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
         />
         <input
-          className="meta"
+          className="input meta"
           placeholder="arXiv id (optional)"
           value={arxiv}
           onChange={(e) => setArxiv(e.target.value)}
         />
-        <button type="submit" disabled={!file || busy}>
+        <button className="btn btn-primary" type="submit" disabled={!file || busy}>
           {busy ? "Uploading…" : "Upload"}
         </button>
       </form>
@@ -83,12 +83,18 @@ export function CorpusPanel({ docs, onUpload, onRetry, onPin, onUnpin }: Props) 
               </span>
               <span className="acts">
                 {d.status === "failed" && (
-                  <button onClick={() => onRetry(d.doc_id)}>Retry</button>
+                  <button className="btn btn-sm" onClick={() => onRetry(d.doc_id)}>
+                    Retry
+                  </button>
                 )}
                 {d.pinned_here ? (
-                  <button onClick={() => onUnpin(d.doc_id)}>Unpin</button>
+                  <button className="btn btn-sm" onClick={() => onUnpin(d.doc_id)}>
+                    Unpin
+                  </button>
                 ) : (
-                  <button onClick={() => onPin(d.doc_id)}>Pin</button>
+                  <button className="btn btn-sm" onClick={() => onPin(d.doc_id)}>
+                    Pin
+                  </button>
                 )}
               </span>
             </div>

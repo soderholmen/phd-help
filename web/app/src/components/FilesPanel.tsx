@@ -51,7 +51,7 @@ export function FilesPanel({ files, trash, onUpload, onRemove, onRestore }: Prop
           aria-label="TeX file"
           onChange={(e) => setFile(e.target.files?.[0] ?? null)}
         />
-        <button type="submit" disabled={!file || busy}>
+        <button className="btn btn-primary" type="submit" disabled={!file || busy}>
           {busy ? "Uploading…" : "Upload"}
         </button>
       </form>
@@ -63,7 +63,9 @@ export function FilesPanel({ files, trash, onUpload, onRemove, onRestore }: Prop
             <span className="ttl">{f.path}</span>
             {!f.linked && <span className="meta"> (not in the document)</span>}
             <span className="acts">
-              <button onClick={() => onRemove(f.path)}>Remove</button>
+              <button className="btn btn-sm" onClick={() => onRemove(f.path)}>
+                Remove
+              </button>
             </span>
           </li>
         ))}
@@ -74,7 +76,9 @@ export function FilesPanel({ files, trash, onUpload, onRemove, onRestore }: Prop
             <li key={t} className="file">
               <span className="meta">{t}</span>
               <span className="acts">
-                <button onClick={() => onRestore(t)}>Restore</button>
+                <button className="btn btn-sm" onClick={() => onRestore(t)}>
+                  Restore
+                </button>
               </span>
             </li>
           ))}

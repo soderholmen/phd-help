@@ -43,4 +43,12 @@ describe("SectionTree", () => {
     render(<SectionTree tree={tree} selected={null} onSelect={() => {}} />);
     expect(screen.queryByRole("button", { name: /clear anchor/i })).toBeNull();
   });
+
+  it("an empty tree says so without faking a node", () => {
+    const { container } = render(
+      <SectionTree tree={[]} selected={null} onSelect={() => {}} />,
+    );
+    expect(screen.getByText(/no sections yet/)).toBeInTheDocument();
+    expect(container.querySelectorAll("li")).toHaveLength(0);
+  });
 });

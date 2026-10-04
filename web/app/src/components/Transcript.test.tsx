@@ -24,6 +24,13 @@ it("renders nothing without messages", () => {
   expect(container.querySelectorAll("li")).toHaveLength(0);
 });
 
+it("the empty transcript still says how to start", () => {
+  const { container } = render(<Transcript messages={[]} />);
+  // an invitation, not a message: a <p>, never an <li>
+  expect(screen.getByText(/nothing said yet/)).toBeInTheDocument();
+  expect(container.querySelectorAll("li")).toHaveLength(0);
+});
+
 it("renders a fenced draft as a pre block with the fences gone", () => {
   const { container } = render(
     <Transcript messages={[{ id: 1, role: "assistant",

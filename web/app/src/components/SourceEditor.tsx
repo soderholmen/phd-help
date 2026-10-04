@@ -33,10 +33,16 @@ export function SourceEditor({ path, text, onSave, onCancel }: Props) {
       <header className="sec-head">
         <span className="src-path">{path}</span>
         <span className="edit-acts">
-          <button onClick={() => void save()} disabled={saving}>
+          {/* Save waits for a change: an unmodified file has nothing
+              to write, and a needless save burns the base hash. */}
+          <button
+            className="btn btn-primary"
+            onClick={() => void save()}
+            disabled={saving || draft === text}
+          >
             Save
           </button>
-          <button onClick={onCancel} disabled={saving}>
+          <button className="btn" onClick={onCancel} disabled={saving}>
             Discard
           </button>
         </span>

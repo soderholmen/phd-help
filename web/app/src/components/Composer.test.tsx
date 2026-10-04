@@ -19,4 +19,14 @@ describe("Composer", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     expect(onSend).not.toHaveBeenCalled();
   });
+
+  it("Send waits for something to send", () => {
+    render(<Composer onSend={() => {}} />);
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("message"), {
+      target: { value: "tighten it" },
+    });
+    expect(send).toBeEnabled();
+  });
 });

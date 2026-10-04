@@ -14,6 +14,7 @@
 // Everything else edits through the source editor: per-block and
 // per-section affordances both open it.
 import { useState } from "react";
+import type { KeyboardEvent } from "react";
 import type { Block, DocSection, FilePatch } from "../types";
 
 interface Props {
@@ -27,6 +28,8 @@ interface Props {
 type TextBlock = Extract<Block, { text: string }>;
 
 // The open draft: the block it opened on, seam frozen at open time.
+// `orig` is the block's text at open — Escape only closes a draft
+// that still equals it, so a key never silently eats typed work.
 interface Draft {
   path: string;
   kind: string;
@@ -34,6 +37,7 @@ interface Draft {
   end: number;
   base: string;
   text: string;
+  orig: string;
 }
 
 function InlineDraft({
@@ -52,16 +56,20 @@ function InlineDraft({
   return (
     <div className="edit-inline">
       <textarea
+        autoFocus
         value={draft.text}
         rows={Math.min(12, draft.text.split("\n").length + 1)}
         onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape" && draft.text === draft.orig) onDiscard();
+        }}
         aria-label={`Edit ${draft.kind}`}
       />
       <span className="edit-acts">
-        <button onClick={onSave} disabled={saving}>
+        <button className="btn btn-primary" onClick={onSave} disabled={saving}>
           Save
         </button>
-        <button onClick={onDiscard} disabled={saving}>
+        <button className="btn" onClick={onDiscard} disabled={saving}>
           Discard
         </button>
       </span>
@@ -111,6 +119,20 @@ function BlockView({
 
   const open =
     b.editable && "text" in b ? () => onOpen(b) : undefined;
+  // Keyboard parity with the click. No role override: an editable
+  // heading must stay a heading (the tests, and screen readers, read
+  // the paper's structure through that role).
+  const keys = open
+    ? {
+        tabIndex: 0,
+        onKeyDown: (e: KeyboardEvent) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault(); // Space would scroll the prose
+            open();
+          }
+        },
+      }
+    : {};
   const cls = b.editable ? "editable" : undefined;
   // The kernel's `editable` is the whole story: list/math/raw never
   // carry it, so everything not prose-editable offers the source.
@@ -123,7 +145,7 @@ function BlockView({
       const level = Math.min(3, Math.max(1, b.level));
       const Tag = `h${level}` as "h1" | "h2" | "h3";
       return (
-        <Tag onClick={open} className={cls}>
+        <Tag onClick={open} {...keys} className={cls}>
           {b.text}
           {src}
         </Tag>
@@ -131,7 +153,7 @@ function BlockView({
     }
     case "paragraph":
       return (
-        <p onClick={open} className={cls}>
+        <p onClick={open} {...keys} className={cls}>
           {b.text}
           {src}
         </p>
@@ -159,7 +181,7 @@ function BlockView({
     case "caption":
       return (
         <figure>
-          <figcaption onClick={open} className={cls}>
+          <figcaption onClick={open} {...keys} className={cls}>
             {b.text}
           </figcaption>
           {src}
@@ -214,7 +236,7 @@ export function ReadView({ sections, onEditSource, onPatch }: Props) {
           <section key={s.path} data-path={s.path}>
             <header className="sec-head">
               <button
-                className="edit-src"
+                className="btn btn-ghost btn-sm"
                 onClick={() => onEditSource(s.path)}
               >
                 Edit source
@@ -239,6 +261,7 @@ export function ReadView({ sections, onEditSource, onPatch }: Props) {
                     end: blk.end,
                     base: blk.base,
                     text: blk.text,
+                    orig: blk.text,
                   })
                 }
                 onChange={(text) =>

@@ -36,6 +36,7 @@ export function DiffCard({ card, onApprove, onReject }: Props) {
       </pre>
       <div className="acts">
         <button
+          className="btn btn-primary"
           disabled={decided}
           onClick={() => {
             setDecided(true);
@@ -45,6 +46,7 @@ export function DiffCard({ card, onApprove, onReject }: Props) {
           Apply
         </button>
         <button
+          className="btn"
           disabled={decided}
           onClick={() => {
             setDecided(true);

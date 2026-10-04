@@ -4,7 +4,25 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f6f3ee" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#171512" media="(prefers-color-scheme: dark)" />
     <title>phd-helper</title>
+    <script>
+      // Resolve the theme before first paint (no flash of the wrong
+      // one): the stored choice wins, else the OS verdict. useTheme
+      // owns everything after this; the choice is persisted only on
+      // an explicit toggle, so OS-following survives plain loads.
+      try {
+        var t = localStorage.getItem("phd-theme");
+        if (t !== "dark" && t !== "light")
+          t = matchMedia("(prefers-color-scheme: dark)").matches
+            ? "dark"
+            : "light";
+        document.documentElement.dataset.theme = t;
+      } catch (e) {
+        /* no storage/matchMedia: CSS defaults to light */
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
