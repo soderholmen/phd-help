@@ -236,7 +236,7 @@ button { font: inherit; color: inherit; }
 }
 
 .left, .right { overflow-y: auto; min-height: 0; }
-.left h2, .corpus h2, .files h2 {
+.left h2, .corpus h2, .related h2, .files h2 {
   margin: 0 0 var(--sp-2);
   font-size: var(--fs-xs);
   text-transform: uppercase;
@@ -631,9 +631,10 @@ button { font: inherit; color: inherit; }
 .upload .meta { flex: 1; min-width: 8rem; }
 .upload input[type="file"] { font-size: var(--fs-sm); color: var(--text-muted); }
 .corpus ul, .files ul { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-2); }
-/* The card shape the corpus and file rows share: one surface, one
-   line, one lift — the shape is stated once, the layouts differ. */
+/* The card shape the corpus, related and file rows share: one surface,
+   one line, one lift — the shape is stated once, the layouts differ. */
 .doc,
+.related .paper,
 .file {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -663,6 +664,27 @@ button { font: inherit; color: inherit; }
 .acts { margin-left: auto; display: flex; gap: var(--sp-1); }
 .err { color: var(--bad); font-size: var(--fs-xs); }
 .empty { color: var(--text-muted); font-style: italic; font-size: var(--fs-sm); }
+
+/* Related work (SPEC §6, issue #29): the same card shape, plus the
+   one-line why and a two-line abstract preview — a surface, not a
+   reader: the full text lives in the corpus, not on the card. */
+.related { display: grid; gap: var(--sp-2); align-content: start; margin-top: var(--sp-5); }
+.related ul { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-2); }
+.related .head { display: flex; gap: var(--sp-2); align-items: center; }
+.related .head h2 { margin: 0; }
+.related .paper { display: grid; gap: 0.2rem; }
+.related .row { display: flex; gap: var(--sp-2); align-items: baseline; flex-wrap: wrap; }
+.related .why { color: var(--text-muted); font-style: italic; font-size: var(--fs-sm); }
+.related .abs {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+.st.cited { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
 
 /* File doors (#28): the same shape as the corpus list, smaller stakes. */
 .files { display: grid; gap: var(--sp-2); align-content: start; margin-top: var(--sp-5); }

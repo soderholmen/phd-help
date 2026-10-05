@@ -272,7 +272,7 @@ def make_validators(project: Project, draft: str | None = None) -> dict:
 async def execute_async(call, project: Project, resolve=resolve_bibtex,
                         search=search_papers, fetch=None, mailto: str = "",
                         openalex_mailto: str = "", corpus=None,
-                        store=None, autojoin=None,
+                        store=None, autojoin=None, on_results=None,
                         window: set[str] | None = None,
                         git_run=None, git_name: str = "phd-helper",
                         git_email: str = "phd-helper@local") -> dict:
@@ -298,6 +298,15 @@ async def execute_async(call, project: Project, resolve=resolve_bibtex,
             return {"error": "search unavailable (no HTTP fetcher)"}
         hits = await search(call.args["query"], fetch,
                             mailto=openalex_mailto)
+        if on_results is not None:
+            # The related-work panel records the search whole (abstracts
+            # and all — the panel shows them; the tool result below stays
+            # abstract-free, §4). Best-effort like autojoin: a store fault
+            # never sinks the result the model is waiting on.
+            try:
+                on_results(hits)
+            except Exception:
+                pass
         if autojoin is not None:
             # §6: papers with an openly downloadable PDF auto-join the
             # corpus (arXiv ids are the open path; paywalled hits get a

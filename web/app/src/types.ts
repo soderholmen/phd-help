@@ -129,6 +129,30 @@ export interface CorpusDoc {
   chunk_count: number;
 }
 
+// One card from GET /project/related (related.py corpus_join rows). The
+// panel is a surface, not context: these entries never enter per-turn
+// assembly (SPEC §4). `in_corpus` is the version-insensitive arXiv/DOI
+// join against the corpus — null means the paper is not in it, so the
+// card has no Pin to offer.
+export interface RelatedEntry {
+  title: string;
+  authors: string[];
+  year: string;
+  arxiv: string;
+  doi: string;
+  venue: string;
+  abstract: string;
+  why: string;
+  found_by: string;
+  cited: boolean;
+  in_corpus: { doc_id: string; status: string; pinned_here: boolean } | null;
+}
+
+export interface RelatedList {
+  entries: RelatedEntry[];
+  searching: boolean;
+}
+
 // /health shape.
 export interface Health {
   vllm: string;

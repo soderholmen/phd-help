@@ -139,6 +139,29 @@ class Project:
                        encoding="utf-8")
         tmp.replace(self.state_dir / "gists.json")
 
+    # -- related work store (docs/related-work.md) ----------------------------
+
+    def load_related(self) -> list:
+        """[{"entries": […]}]; a missing, torn or wrong-shaped file reads
+        as an empty list — the panel shows its empty state, never a
+        failed door (§8)."""
+        try:
+            data = json.loads(
+                (self.state_dir / "related.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        entries = data.get("entries") if isinstance(data, dict) else None
+        return entries if isinstance(entries, list) else []
+
+    def save_related(self, entries: list) -> None:
+        # Atomic replace (the save_gists rule): the librarian's write and
+        # a tick's read must never meet a half-written list.
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        tmp = self.state_dir / "related.json.tmp"
+        tmp.write_text(json.dumps({"entries": entries},
+                                  ensure_ascii=False), encoding="utf-8")
+        tmp.replace(self.state_dir / "related.json")
+
     def read_bib(self) -> str:
         bib = self.root / "refs.bib"
         return bib.read_text(encoding="utf-8") if bib.exists() else ""

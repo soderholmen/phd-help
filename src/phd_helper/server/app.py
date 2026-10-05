@@ -31,6 +31,8 @@ from phd_helper.ingest import IngestError, Ingestor
 from phd_helper.patches import AnchoredPatch, section_hash
 from phd_helper.project import Project
 from phd_helper.readable import read_document
+from phd_helper.related import (corpus_join, entries_from_rows, mark_cited,
+                                merge, to_dict, to_entry)
 from phd_helper import gitrepo, sessionlog
 from phd_helper.saytext import (Unfence, extract_draft, for_speech,
                                 strip_fences)
@@ -366,6 +368,11 @@ class Session:
                         corpus=self.state.corpus,
                         store=self.state.corpus_store,
                         autojoin=lambda ids: autojoin(self.state, ids),
+                        # the turn's project, not state.project: a search
+                        # belongs to the paper it was run for (the turn
+                        # captured `project` at start).
+                        on_results=lambda hits: record_related(project,
+                                                               hits),
                         git_run=getattr(self.state, "git_run", None),
                         git_name=self.state.config.git_name,
                         git_email=self.state.config.git_email,
@@ -677,6 +684,12 @@ class AppState:
                                  fetch_pdf=self._fetch_pdf_or_raise)
         self.ingest_tasks: set[asyncio.Task] = set()
         self.gist_task: asyncio.Task | None = None
+        # The librarian pass (planned — docs/related-work.md, issue #29)
+        # will register here, one at a time, and the GET door's
+        # "searching" reads this guard rather than a stored flag. Today
+        # nothing starts a pass, so it stays None and the door reads
+        # false — the seam exists so the door's shape never changes.
+        self.related_task: asyncio.Task | None = None
 
     async def _fetch_pdf_or_raise(self, url: str) -> bytes:
         status, body = await self.fetch_pdf(url)
@@ -1062,6 +1075,21 @@ async def autojoin(state, hits) -> None:
                                                 year=h.year))
 
 
+def record_related(project, hits, found_by: str = "search") -> None:
+    """The related-work panel records every search (docs/related-work.md).
+    The turn's own project, captured at the call site: a search belongs
+    to the paper it was run for, not whatever is active when it lands.
+    Sync on purpose: the whole read-modify-write runs without an await,
+    so no other coroutine can interleave — two searches landing together
+    cannot lose one. (The file write itself is the save_gists atomic
+    replace, so a tick's read never meets a half-written list.)"""
+    new = [to_entry(h, found_by=found_by) for h in hits]
+    if not new:
+        return                      # an empty search rewrites nothing
+    existing = entries_from_rows(project.load_related())
+    project.save_related([to_dict(e) for e in merge(existing, new)])
+
+
 def create_app(state: "AppState | None" = None,
                web_dir: Path | None = None) -> FastAPI:
     state = state or AppState()
@@ -1385,6 +1413,22 @@ def create_app(state: "AppState | None" = None,
                 return {"applied": False, "reason": r["reason"]}
             return JSONResponse({"error": r["reason"]}, status_code=409)
         return {"applied": True, **r["undone"]}
+
+    @app.get("/project/related")
+    async def project_related():
+        # The related-work panel's polled truth (docs/related-work.md):
+        # the store joined against refs.bib (cited) and the corpus
+        # registry (the Pin affordance) — the client joins nothing.
+        # "searching" is the librarian guard's live state, not a stored
+        # flag, so when the pass lands a crashed run can never leave the
+        # panel spinning; until then the guard is always None.
+        entries = entries_from_rows(state.project.load_related())
+        entries = mark_cited(entries, state.project.read_bib())
+        rows = corpus_join(entries, state.corpus.list(),
+                           project=state.project.root.name)
+        task = getattr(state, "related_task", None)
+        return {"entries": rows,
+                "searching": task is not None and not task.done()}
 
     # -- corpus doors and status (SPEC §6): upload is door 1, the agent
     # fetch/auto-join is door 2; the UI reads status, never searches.

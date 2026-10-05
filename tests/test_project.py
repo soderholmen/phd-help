@@ -241,3 +241,27 @@ def test_memory_lives_under_phd_helper_not_the_paper_tree(paper):
     paper.save_memory("x")
     assert (paper.root / ".phd-helper" / "memory.md").exists()
     assert "memory.md" not in paper.files()  # agent state, not a .tex file
+
+
+# -- related work store (docs/related-work.md) --------------------------------
+
+
+def test_the_related_list_round_trips_through_the_state_dir(paper):
+    assert paper.load_related() == []  # never searched: empty, not missing
+    paper.save_related([{"title": "Attention", "arxiv": "1706.03762"}])
+    assert paper.load_related() == [{"title": "Attention",
+                                     "arxiv": "1706.03762"}]
+    assert (paper.root / ".phd-helper" / "related.json").exists()
+    assert "related.json" not in paper.files()  # agent state, not a paper file
+
+
+def test_a_missing_or_torn_related_file_reads_as_empty(paper):
+    # The panel's posture (§8): a torn store is an empty panel, never a
+    # door that 500s — staleness re-records, nothing else.
+    (paper.root / ".phd-helper").mkdir(parents=True, exist_ok=True)
+    (paper.root / ".phd-helper" / "related.json").write_text(
+        '{"entries": [tru', encoding="utf-8")
+    assert paper.load_related() == []
+    (paper.root / ".phd-helper" / "related.json").write_text(
+        '["not", "the", "shape"]', encoding="utf-8")
+    assert paper.load_related() == []

@@ -55,6 +55,16 @@ class DocRecord:
     supersedes: str = ""
 
 
+def owned_doc(docs, arxiv: str, doi: str):
+    """The registry's ownership rule: version-insensitive arXiv id, else
+    DOI. One copy on purpose — add_pdf's supersede lookup and the
+    related-work panel's corpus join must not drift apart (§6)."""
+    key = normalize_arxiv(arxiv)
+    return next((d for d in docs
+                 if (key and normalize_arxiv(d.arxiv) == key)
+                 or (doi and d.doi == doi)), None)
+
+
 @dataclass
 class _State:
     docs: list[DocRecord] = field(default_factory=list)
@@ -99,10 +109,7 @@ class Corpus:
             return dup, False
         # Version-insensitive: 2301.00001v2 is a new version of an owned
         # 2301.00001v1, not a second paper (§6 supersede, not duplicate).
-        key = normalize_arxiv(arxiv)
-        owned = next((d for d in docs if (key and
-                                          normalize_arxiv(d.arxiv) == key) or
-                      (doi and d.doi == doi)), None)
+        owned = owned_doc(docs, arxiv, doi)
         rec = DocRecord(
             doc_id=sha[:16], sha256=sha, title=title, arxiv=arxiv, doi=doi,
             year=year, source=source, status="queued",

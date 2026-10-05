@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 from types import SimpleNamespace
 
+from phd_helper.cascade import Response
 from phd_helper.corpus import Corpus
 from phd_helper.gists import body_sha
 from phd_helper.toolcall import ValidCall
@@ -2547,6 +2548,72 @@ def test_undo_door_bounces_conflict_when_the_entry_meta_moved(tmp_path):
         r = client.post("/project/undo")
     assert r.status_code == 409
     assert "undo failed" in r.json()["error"]
+
+
+# -- related work panel (docs/related-work.md) -------------------------------
+
+
+def test_the_related_door_lists_entries_with_corpus_and_cited_marks(tmp_path):
+    # The panel's polled truth: make_env's corpus owns Attention
+    # (arXiv 1706.03762) pinned to this project, and refs.bib cites the
+    # other entry — the door joins both, the client joins nothing.
+    state = ws_state(tmp_path)
+    state.project.save_related([
+        {"title": "Attention Is All You Need", "arxiv": "1706.03762",
+         "authors": ["Vaswani, Ashish"], "year": "2017"},
+        {"title": "Unrelated", "arxiv": "9999.00001"}])
+    (state.project.root / "refs.bib").write_text(
+        "@article{x,\n  title={Unrelated},\n  eprint={9999.00001},\n}\n",
+        encoding="utf-8")
+    with TestClient(create_app(state=state)) as client:
+        r = client.get("/project/related")
+    assert r.status_code == 200
+    rows = r.json()["entries"]
+    att = next(e for e in rows if e["title"] == "Attention Is All You Need")
+    assert att["in_corpus"]["pinned_here"] is True
+    assert att["in_corpus"]["status"] == "queued"  # never ingested here
+    assert att["cited"] is False
+    un = next(e for e in rows if e["title"] == "Unrelated")
+    assert un["in_corpus"] is None
+    assert un["cited"] is True
+    assert r.json()["searching"] is False
+
+
+def test_the_related_door_says_empty_on_a_fresh_project(tmp_path):
+    # A project that never searched has no related.json: the panel's
+    # empty state, not a 404 — same posture as the undo door.
+    state = ws_state(tmp_path)
+    with TestClient(create_app(state=state)) as client:
+        r = client.get("/project/related")
+    assert r.status_code == 200
+    assert r.json() == {"entries": [], "searching": False}
+
+
+@pytest.mark.anyio
+async def test_a_turns_web_search_lands_in_the_related_store(tmp_path):
+    # The recording pipeline end to end: the model calls web_search,
+    # the hits (abstracts included) are remembered in the project.
+    state, session, events = pending_env(tmp_path, [
+        tool_step("web_search", {"query": "mesh anything"}),
+        text_step("Found one."),
+    ])
+    oa = json.dumps({"results": [{
+        "display_name": "Mesh Anything", "publication_year": 2024,
+        "doi": "https://doi.org/10.48550/arXiv.2401.00002",
+        "authorships": [{"author": {"display_name": "Noam Shazeer"}}],
+        "primary_location": None,
+        "abstract_inverted_index": {"A": [0], "generative": [1],
+                                    "model": [2]}}]})
+
+    async def fetch(url, headers=None):
+        return Response(200, oa if "openalex" in url else "<feed/>")
+
+    state.fetch = fetch
+    await session.run_turn("find mesh anything papers")
+    entries = state.project.load_related()
+    assert [e["title"] for e in entries] == ["Mesh Anything"]
+    assert entries[0]["abstract"] == "A generative model"
+    assert entries[0]["found_by"] == "search"
 
 
 def test_projects_download_zip(tmp_path):

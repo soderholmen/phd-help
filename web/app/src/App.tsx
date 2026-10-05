@@ -33,11 +33,13 @@ import {
   type ProjectFile,
 } from "./api/files";
 import { fetchDocument } from "./api/document";
+import { getRelated } from "./api/related";
 import type {
   CorpusDoc,
   DocSection,
   FilePatch,
   Health,
+  RelatedEntry,
   SectionNode,
 } from "./types";
 import { Header } from "./components/Header";
@@ -46,6 +48,7 @@ import { Transcript } from "./components/Transcript";
 import { Composer } from "./components/Composer";
 import { DiffCard } from "./components/DiffCard";
 import { CorpusPanel } from "./components/CorpusPanel";
+import { RelatedPanel } from "./components/RelatedPanel";
 import { FilesPanel } from "./components/FilesPanel";
 import { ReadView } from "./components/ReadView";
 import { SourceEditor } from "./components/SourceEditor";
@@ -102,6 +105,12 @@ export default function App() {
   // is milliseconds, and the state must be known, not discovered at
   // the Commit click (§8).
   const [git, setGit] = useState<GitStatus | null>(null);
+  // Related work (SPEC §6, issue #29): the agent's searches record
+  // themselves server-side; the panel just reads them on the same tick.
+  // `searching` mirrors the door's one-at-a-time guard, never a local
+  // guess — the server owns whether a pass is running.
+  const [related, setRelated] = useState<RelatedEntry[]>([]);
+  const [relatedSearching, setRelatedSearching] = useState(false);
   // The read view (SPEC §Section view): Talk/Read is a local view toggle
   // — the transcript keeps living underneath. /document rides the tick
   // only while reading, so the paper stays fresh as the agent writes.
@@ -138,7 +147,8 @@ export default function App() {
     }
   }, [state.messages]);
 
-  // One 3 s poll for tree + health + corpus status + projects + files:
+  // One 3 s poll for tree + health + corpus status + projects + files +
+  // related work:
   // indexing is async and must be visible (§6), and the agent can
   // restructure the paper (a new \input) so the tree is not fetch-once.
   // A backgrounded tab stays quiet and catches up on focus (§3's
@@ -146,7 +156,7 @@ export default function App() {
   useEffect(() => {
     let stop = false;
     const tick = async () => {
-      const [t, h, d, p, f, g, doc] = await Promise.allSettled([
+      const [t, h, d, p, f, g, doc, rel] = await Promise.allSettled([
         fetchTree(),
         fetchHealth(),
         listDocs(),
@@ -154,6 +164,7 @@ export default function App() {
         listFiles(),
         gitStatus(),
         readingRef.current ? fetchDocument() : Promise.resolve(null),
+        getRelated(),
       ]);
       if (stop) return;
       if (t.status === "fulfilled") setTree(t.value);
@@ -170,6 +181,10 @@ export default function App() {
       }
       if (g.status === "fulfilled") setGit(g.value);
       if (doc.status === "fulfilled" && doc.value) setDoc(doc.value.sections);
+      if (rel.status === "fulfilled") {
+        setRelated(rel.value.entries);
+        setRelatedSearching(rel.value.searching);
+      }
     };
     const go = () => {
       if (!document.hidden) void tick();
@@ -263,6 +278,14 @@ export default function App() {
         type: "local_notice",
         text: `${label}: ${e instanceof Error ? e.message : "failed"}`,
       });
+
+  // Cite from a related card is a typed turn (§5): the words go through
+  // the same approval flow as if the user had spoken them — the panel
+  // itself never writes to the paper.
+  const citeText = (e: RelatedEntry, section: string | null) =>
+    `Cite "${e.title}"${
+      e.arxiv ? ` (arXiv ${e.arxiv})` : e.doi ? ` (DOI ${e.doi})` : ""
+    } in ${section ?? "the right place"}.`;
 
   const onActivate = (name: string) =>
     void activateProject(name)
@@ -443,6 +466,13 @@ export default function App() {
             onRetry={(id) => void retry(id).catch(() => {})}
             onPin={(id) => void pin(id).catch(() => {})}
             onUnpin={(id) => void unpin(id).catch(() => {})}
+          />
+          <RelatedPanel
+            entries={related}
+            searching={relatedSearching}
+            onPin={(id) => void pin(id).catch(() => {})}
+            onUnpin={(id) => void unpin(id).catch(() => {})}
+            onCite={(e) => send(citeText(e, state.selected))}
           />
           <FilesPanel
             files={files}

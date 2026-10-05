@@ -295,6 +295,30 @@ async def test_autojoin_failure_never_sinks_the_search_result(paper):
     assert len(result["results"]) == 1 and "error" not in result
 
 
+# -- related-work recording (docs/related-work.md): the panel sees searches
+
+@pytest.mark.anyio
+async def test_web_search_reports_the_whole_hits_to_the_panel(paper):
+    seen = []
+    result = await execute_async(
+        call("web_search", {"query": "mesh anything"}), paper,
+        search=fake_search(HITS), on_results=seen.append)
+    assert [h.arxiv for h in seen[0]] == ["2401.00002"]
+    # the model's result is built field-by-field and stays abstract-free
+    # (§4 budget); the panel gets the whole hits through the callback.
+    assert "abstract" not in result["results"][0]
+
+
+@pytest.mark.anyio
+async def test_a_store_fault_never_sinks_the_search_result(paper):
+    def on_results(hits):
+        raise RuntimeError("disk full")
+    result = await execute_async(
+        call("web_search", {"query": "mesh anything"}), paper,
+        search=fake_search(HITS), on_results=on_results)
+    assert len(result["results"]) == 1 and "error" not in result
+
+
 def test_cite_add_validator_checks_anchor(paper):
     v = make_validators(paper)["cite_add"]
     assert v({"section": "sections/intro.tex", "find": "It works well.",

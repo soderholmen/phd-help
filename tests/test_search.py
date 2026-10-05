@@ -9,7 +9,7 @@ import json
 import pytest
 
 from phd_helper.cascade import Response  # the fetcher seam's type
-from phd_helper.search import search_papers
+from phd_helper.search import PaperHit, dedupe, search_papers
 
 
 @pytest.fixture
@@ -169,6 +169,88 @@ async def test_old_format_ids_dedupe_case_insensitively():
     hits = await search_papers("original title", fetch)
     assert len(hits) == 1
     assert hits[0].arxiv == "math.GT/0309136"  # arXiv's own casing wins
+
+
+# The related-work panel shows a two-line abstract preview, so the hit
+# carries one (docs/related-work.md). Tool results to the model stay
+# abstract-free: §4's context budget is untouched by the panel.
+ARXIV_ATOM_SUMMARY = (
+    '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">'
+    '<entry><id>http://arxiv.org/abs/1706.03762v7</id>'
+    '<title>Attention Is All You Need</title>'
+    '<published>2017-06-12T00:00:00Z</published>'
+    '<summary>The dominant sequence transduction models are based on\n'
+    '  complex recurrent or convolutional neural networks.</summary>'
+    '<author><name>Ashish Vaswani</name></author></entry></feed>')
+
+
+@pytest.mark.anyio
+async def test_arxiv_summaries_ride_the_hit():
+    fetch, calls = recorder(Response(200, '{"results": []}'),
+                            Response(200, ARXIV_ATOM_SUMMARY))
+    hits = await search_papers("attention", fetch)
+    # folded like the title: the Atom feed wraps summaries mid-sentence
+    assert hits[0].abstract == ("The dominant sequence transduction models "
+                                "are based on complex recurrent or "
+                                "convolutional neural networks.")
+
+
+@pytest.mark.anyio
+async def test_openalex_abstracts_are_rebuilt_from_the_inverted_index():
+    # OpenAlex ships no abstract text, only {word: [positions]} — the
+    # reconstruction is the only way to a preview from this source.
+    oa = json.dumps({"results": [{
+        "display_name": "Retrieval Augmented Generation",
+        "publication_year": 2020, "doi": "https://doi.org/10.1000/rag",
+        "authorships": [{"author": {"display_name": "Jane Doe"}}],
+        "primary_location": None,
+        "abstract_inverted_index": {"Retrieval": [0], "augmented": [1],
+                                    "generation": [2], "combines": [3],
+                                    "retrieval": [5], "with": [4]}}]})
+    fetch, calls = recorder(Response(200, oa), Response(200, "<feed/>"))
+    hits = await search_papers("rag", fetch)
+    assert hits[0].abstract == "Retrieval augmented generation combines " \
+        "with retrieval"
+
+
+@pytest.mark.anyio
+async def test_a_work_without_an_abstract_reads_empty_not_partial():
+    # Spotty coverage is the norm here: most OpenAlex works carry no
+    # inverted index at all, and a malformed one must not yield a
+    # half-sentence the card would then show as if it were the abstract.
+    oa = json.dumps({"results": [
+        {"display_name": "No Index", "publication_year": 2019,
+         "doi": "https://doi.org/10.1000/a", "authorships": [],
+         "primary_location": None},
+        {"display_name": "Broken Index", "publication_year": 2019,
+         "doi": "https://doi.org/10.1000/b", "authorships": [],
+         "primary_location": None,
+         "abstract_inverted_index": "not-a-dict"},
+        # a real index covers every position 0..n-1; a sparse one has
+        # lost words, and "a b" would pose as a two-word abstract
+        {"display_name": "Sparse Index", "publication_year": 2019,
+         "doi": "https://doi.org/10.1000/c", "authorships": [],
+         "primary_location": None,
+         "abstract_inverted_index": {"a": [0], "b": [5]}}]})
+    fetch, calls = recorder(Response(200, oa), Response(200, "<feed/>"))
+    hits = await search_papers("anything", fetch)
+    assert [h.abstract for h in hits] == ["", "", ""]
+
+
+def test_dedupe_is_public_for_the_related_store():
+    # The panel merges its own list with fresh hits, so the identity
+    # rules are the search loop's, not a second copy (docs/related-work.md).
+    keep = PaperHit(title="Attention Is All You Need",
+                    authors=("Vaswani, Ashish",), year="2017",
+                    arxiv="1706.03762", doi="", venue="", source="arxiv")
+    twin = PaperHit(title="Attention Is All You Need",
+                    authors=("Vaswani, Ashish",), year="2025", arxiv="",
+                    doi="10.65215/2q58a426", venue="", source="openalex")
+    other = PaperHit(title="A Second Paper", authors=("Doe, Jane",),
+                     year="2019", arxiv="", doi="10.1000/second", venue="",
+                     source="openalex")
+    assert dedupe([keep, twin, other]) == [keep, other]
+    assert dedupe([keep, other], cap=1) == [keep]
 
 
 @pytest.mark.anyio
