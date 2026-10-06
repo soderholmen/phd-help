@@ -45,7 +45,9 @@
   --font-ui: system-ui, "Segoe UI", sans-serif;
   --font-read: ui-serif, Georgia, "Times New Roman", serif;
   --font-mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
-  --measure: 68ch;
+  /* The read view's line (user: 68ch "just taking 50% of the screen").
+     It now fills the center column up to a still-readable 110ch. */
+  --measure: min(110ch, 100%);
 }
 
 /* Dark: the same token names, re-inked once. Warm neutrals kept —
