@@ -5,9 +5,9 @@ LLM or the network."""
 
 import json
 
-from phd_helper.related import (RelatedEntry, corpus_join, from_dict,
-                                mark_cited, merge, parse_json_array,
-                                to_dict, to_entry)
+from phd_helper.related import (RelatedEntry, corpus_join, drop_cited,
+                                from_dict, mark_cited, merge,
+                                parse_json_array, to_dict, to_entry)
 from phd_helper.search import PaperHit
 
 
@@ -87,6 +87,20 @@ def test_cited_marking_survives_an_empty_bib():
     assert not out[0].cited
 
 
+def test_the_librarian_drops_papers_already_in_refs_bib():
+    # The pass must not re-find what the paper already cites — and the
+    # drop rule is mark_cited's rule (one copy): version-insensitive
+    # arXiv id or DOI. A hit with no id cannot be proven cited and
+    # stays a candidate, same posture as its Cite button.
+    bib = ("@article{x,\n  eprint={1706.03762}\n}\n"
+           "@article{y,\n  doi={10.1000/second}\n}\n")
+    hits = [hit("Attention", arxiv="1706.03762v7"),
+            hit("Second", doi="10.1000/second"),
+            hit("Fresh", arxiv="9999.00001"),
+            hit("Idless")]
+    assert [h.title for h in drop_cited(hits, bib)] == ["Fresh", "Idless"]
+
+
 class Doc:
     """The registry's read shape, duck-typed (the real DocRecord carries
     more; the join only ever reads identity and pin state)."""
@@ -123,6 +137,25 @@ def test_entries_round_trip_through_the_store_shape():
     d = to_dict(e)
     assert json.loads(json.dumps(d)) == d  # plain JSON: no tuples on disk
     assert from_dict(d) == e
+
+
+def test_an_entry_remembers_the_query_that_found_it():
+    # "so we know what we have searched for" (issue #29): the card names
+    # its query. An old store row without the field reads as no query,
+    # not a crash.
+    e = to_entry(hit("T", arxiv="1"), why="w", found_by="librarian",
+                 query="maritime jcf")
+    assert from_dict(to_dict(e)) == e
+    assert e.query == "maritime jcf"
+    assert from_dict({"title": "Old row"}).query == ""
+
+
+def test_merging_keeps_the_query_when_the_new_row_lacks_one():
+    old = to_entry(hit("Attention", arxiv="1706.03762"), why="w",
+                   found_by="librarian", query="attention baseline")
+    plain = to_entry(hit("Attention", arxiv="1706.03762"))
+    out = merge([old], [plain])
+    assert out[0].query == "attention baseline"
 
 
 def test_a_torn_store_row_reads_as_nothing():

@@ -20,6 +20,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from phd_helper.bibtex import parse_bib
 from phd_helper.cascade import ArxivRateLimited
 from phd_helper.context import (ContextInputs, PinnedSource, Turn,
                                 approx_tokens, assemble_context,
@@ -31,8 +32,10 @@ from phd_helper.ingest import IngestError, Ingestor
 from phd_helper.patches import AnchoredPatch, section_hash
 from phd_helper.project import Project
 from phd_helper.readable import read_document
-from phd_helper.related import (corpus_join, entries_from_rows, mark_cited,
-                                merge, to_dict, to_entry)
+from phd_helper.related import (corpus_join, drop_cited, entries_from_rows,
+                                mark_cited, merge, parse_json_array, to_dict,
+                                to_entry)
+from phd_helper.search import dedupe, search_papers
 from phd_helper import gitrepo, sessionlog
 from phd_helper.saytext import (Unfence, extract_draft, for_speech,
                                 strip_fences)
@@ -370,9 +373,10 @@ class Session:
                         autojoin=lambda ids: autojoin(self.state, ids),
                         # the turn's project, not state.project: a search
                         # belongs to the paper it was run for (the turn
-                        # captured `project` at start).
-                        on_results=lambda hits: record_related(project,
-                                                               hits),
+                        # captured `project` at start); the query rides
+                        # along so the card can name its search.
+                        on_results=lambda hits, query: record_related(
+                            project, hits, query=query),
                         git_run=getattr(self.state, "git_run", None),
                         git_name=self.state.config.git_name,
                         git_email=self.state.config.git_email,
@@ -684,11 +688,11 @@ class AppState:
                                  fetch_pdf=self._fetch_pdf_or_raise)
         self.ingest_tasks: set[asyncio.Task] = set()
         self.gist_task: asyncio.Task | None = None
-        # The librarian pass (planned — docs/related-work.md, issue #29)
-        # will register here, one at a time, and the GET door's
-        # "searching" reads this guard rather than a stored flag. Today
-        # nothing starts a pass, so it stays None and the door reads
-        # false — the seam exists so the door's shape never changes.
+        # The librarian pass (docs/related-work.md, issue #29)
+        # registers here, one at a time: the Find door no-ops while a
+        # pass runs, and the GET door's "searching" reads this guard
+        # rather than a stored flag — a crashed run can never leave the
+        # panel spinning.
         self.related_task: asyncio.Task | None = None
 
     async def _fetch_pdf_or_raise(self, url: str) -> bytes:
@@ -1075,19 +1079,229 @@ async def autojoin(state, hits) -> None:
                                                 year=h.year))
 
 
-def record_related(project, hits, found_by: str = "search") -> None:
+def record_entries(project, new, meta: dict | None = None) -> None:
+    """Entries into the related store. Sync on purpose: the whole
+    read-modify-write runs without an await, so no other coroutine can
+    interleave — two searches landing together cannot lose one. (The
+    file write itself is the save_gists atomic replace, so a tick's
+    read never meets a half-written list.)"""
+    if not new:
+        return                      # an empty pass rewrites nothing
+    existing = entries_from_rows(project.load_related())
+    project.save_related([to_dict(e) for e in merge(existing, new)],
+                         meta=meta)
+
+
+def record_related(project, hits, found_by: str = "search",
+                   query: str = "") -> None:
     """The related-work panel records every search (docs/related-work.md).
     The turn's own project, captured at the call site: a search belongs
     to the paper it was run for, not whatever is active when it lands.
-    Sync on purpose: the whole read-modify-write runs without an await,
-    so no other coroutine can interleave — two searches landing together
-    cannot lose one. (The file write itself is the save_gists atomic
-    replace, so a tick's read never meets a half-written list.)"""
-    new = [to_entry(h, found_by=found_by) for h in hits]
-    if not new:
-        return                      # an empty search rewrites nothing
-    existing = entries_from_rows(project.load_related())
-    project.save_related([to_dict(e) for e in merge(existing, new)])
+    The query rides onto each entry so the card can name the search
+    that surfaced it (issue #29)."""
+    record_entries(project, [to_entry(h, found_by=found_by, query=query)
+                             for h in hits])
+
+
+def parse_steer(body) -> tuple[list, str]:
+    """The Find door's steer (issue #29): keywords seed the agent's
+    pass, the focus hint says where to look. Untrusted HTTP: a torn or
+    absent body is simply no steer, keywords become trimmed strings
+    capped at eight, the focus is capped — never a 500 on the door."""
+    if not isinstance(body, dict):
+        return [], ""
+    raw = body.get("keywords")
+    if isinstance(raw, str):
+        raw = [raw]                 # one box, one phrase
+    kws = []
+    for k in raw if isinstance(raw, list) else []:
+        k = " ".join(str(k).split())
+        if k:
+            kws.append(k)
+    focus = " ".join(str(body.get("focus") or "").split())[:300]
+    return kws[:8], focus
+
+
+# -- the librarian pass (issue #29): one button, no query box ---------------
+
+LIBRARIAN_QUERY_PROMPT = (
+    "You are the librarian for a LaTeX paper in progress. From the "
+    "material below, plan 3 to 6 short keyword search queries that "
+    "would find the related work this paper should cite: the baselines "
+    "it compares to, the methods it builds on, the phenomena it "
+    "explains. Keyword pairs, not sentences. Reply with a JSON array "
+    "of strings only.")
+LIBRARIAN_FIT_PROMPT = (
+    "You are the librarian for a LaTeX paper in progress. From the "
+    "numbered candidate papers below, pick the ones most worth citing "
+    "for this paper — at most 10, best fit first — and give each a "
+    "one-line why addressed to the writer. Reply with a JSON array of "
+    '{"i": <number>, "why": "<one line>"} objects only.')
+LIBRARIAN_SECTION_CAP = 8000   # chars of the working section sent
+LIBRARIAN_MAX_QUERIES = 6      # the plan's ceiling, whatever the model says
+LIBRARIAN_MAX_PICKS = 10
+
+
+def librarian_context(project, section: str | None, seeds=(),
+                      focus: str = "") -> str:
+    """What the librarian reads before it searches: the skeleton, the
+    section being written (the pass is anchored where the writer is),
+    the writer's steer if any (issue #29 — keywords seed the planning,
+    the focus hint says where to look; the agent still runs every
+    search), and the titles already cited or found — a re-run must not
+    rediscover what the panel already holds."""
+    parts = [f"Paper skeleton:\n{project.skeleton()}"]
+    if section:
+        try:
+            body = project.read_section(section)
+        except Exception:
+            body = ""  # the anchor moved under the click; the pass
+            # still has the skeleton to plan from
+        if body.strip():
+            parts.append(f"Section being written ({section}):\n"
+                         f"{body[:LIBRARIAN_SECTION_CAP]}")
+    steer = []
+    if seeds:
+        steer.append("Build the queries around the writer's keywords: "
+                     + ", ".join(seeds))
+    if focus:
+        steer.append(f"Where to look: {focus}")
+    if steer:
+        parts.append("\n".join(steer))
+    seen = [b.fields.get("title", "") for b in parse_bib(project.read_bib())]
+    seen += [e.get("title", "") for e in project.load_related()]
+    seen = [t for t in seen if t]
+    if seen:
+        parts.append("Already cited or found:\n" + "\n".join(seen))
+    return "\n\n".join(parts)
+
+
+async def librarian_notice(state, project, text: str) -> None:
+    """The pass speaks only for its own project: after a project
+    switch, a notice about the old paper's search would be noise in
+    the new conversation (§7). The guard is project identity, not
+    sitting identity — a new sitting on the same paper still hears it,
+    because it is that paper's news."""
+    sitting = getattr(state, "sitting", None)
+    if sitting is not None and state.project is project:
+        await sitting.send({"type": "notice", "text": text})
+
+
+async def run_librarian(state, project, section: str | None,
+                        seeds=(), focus: str = "") -> None:
+    """The librarian pass (docs/related-work.md): the model reads the
+    paper, plans keyword queries, searches them through the same
+    academic-first stack, ranks its own top picks with a one-line why,
+    and its arXiv-bearing picks auto-join the corpus (§6, unchanged).
+    The writer's steer (seeds/focus, issue #29) folds into the plan
+    prompt — it steers the agent's searches, it does not replace them.
+    Every model reply is untrusted: an unparseable plan ends the pass
+    with a notice, a fit-rank fault degrades to search order — the
+    panel never dies on a bad reply. The project is the caller's
+    capture, not state.project: a switch mid-pass must not re-point
+    the search at the new paper."""
+    try:
+        await _run_librarian(state, project, section, seeds, focus)
+    except Exception:
+        # Anything outside the known ladder is still a fault the writer
+        # hears about (§8) — a silent dead button is the worse failure.
+        # Wrapped like the rest: if the notice send itself is what
+        # faulted, there is no channel left to report on — but the
+        # task must not die screaming into the event loop.
+        try:
+            await librarian_notice(
+                state, project,
+                "The search pass hit a fault — nothing found")
+        except Exception:
+            pass
+
+
+async def _run_librarian(state, project, section: str | None,
+                         seeds=(), focus: str = "") -> None:
+    context = librarian_context(project, section, seeds, focus)
+    try:
+        _, _, plan = await state.llm.chat(
+            [{"role": "system", "content": LIBRARIAN_QUERY_PROMPT},
+             {"role": "user", "content": context}],
+            thinking=True, max_tokens=2000)
+    except Exception:
+        await librarian_notice(state, project,
+                               "The search pass could not reach the model")
+        return
+    queries = [str(q).strip() for q in parse_json_array(plan)]
+    queries = [q for q in queries if q][:LIBRARIAN_MAX_QUERIES]
+    if not queries:
+        await librarian_notice(state, project,
+                               "The search pass found no queries to run")
+        return
+    # Every query runs through the shared politeness limiter (it
+    # serializes behind live searches — §6). The query that found a
+    # hit is the fallback why's subject, tracked by object identity:
+    # dedupe returns the objects it was given, so the ids stay valid.
+    hits, query_of = [], {}
+    for q in queries:
+        try:
+            found = await search_papers(q, state.fetch,
+                                        mailto=state.config.openalex_mailto)
+        except Exception:
+            continue  # one dead source must not sink the whole pass
+        for h in found:
+            hits.append(h)
+            query_of.setdefault(id(h), q)
+    candidates = dedupe(drop_cited(hits, project.read_bib()), cap=60)
+    if not candidates:
+        await librarian_notice(state, project,
+                               "The search pass found nothing new to add")
+        return
+    listing = "\n".join(
+        f"{i}. {h.title} ({h.year}) — from query "
+        f"'{query_of.get(id(h), '')}'"
+        for i, h in enumerate(candidates))
+    picks = []
+    try:
+        _, _, ranked = await state.llm.chat(
+            [{"role": "system", "content": LIBRARIAN_FIT_PROMPT},
+             {"role": "user",
+              "content": f"{context}\n\nCandidates:\n{listing}"}],
+            thinking=False, max_tokens=1500)
+        seen_i = set()
+        for row in parse_json_array(ranked):
+            if not isinstance(row, dict):
+                continue
+            i = row.get("i")
+            if (not isinstance(i, int) or isinstance(i, bool)
+                    or not 0 <= i < len(candidates) or i in seen_i):
+                continue  # out-of-range and duplicate rows are chatter
+            seen_i.add(i)
+            why = " ".join(str(row.get("why") or "").split())[:200]
+            picks.append((candidates[i], why or "fits the paper"))
+    except Exception:
+        picks = []
+    if not picks:  # the rank faulted or answered junk: search order
+        picks = [(h, f"top of query '{query_of.get(id(h), '')}'")
+                 for h in candidates[:LIBRARIAN_MAX_PICKS]]
+    picks = picks[:LIBRARIAN_MAX_PICKS]
+    record_entries(
+        project,
+        [to_entry(h, why=w, found_by="librarian",
+                  query=query_of.get(id(h), "")) for h, w in picks],
+        # what the pass was asked (issue #29): the panel header says
+        # which keywords and focus produced these cards, and when
+        meta={"keywords": list(seeds), "focus": focus,
+              "at": time.strftime("%Y-%m-%d %H:%M")})
+    try:
+        await autojoin(state, [h for h, _ in picks if h.arxiv])
+    except Exception:
+        pass  # best-effort, the same posture as the turn's autojoin
+    try:
+        await librarian_notice(
+            state, project,
+            f"Search pass: {len(picks)} papers added to Related work")
+    except Exception:
+        pass  # the cards are already in the store — the next tick
+        # shows them whether or not the notice reaches a live socket,
+        # and a dead one must not turn a landed pass into the
+        # catch-all's "nothing found" (which would then lie)
 
 
 def create_app(state: "AppState | None" = None,
@@ -1420,15 +1634,43 @@ def create_app(state: "AppState | None" = None,
         # the store joined against refs.bib (cited) and the corpus
         # registry (the Pin affordance) — the client joins nothing.
         # "searching" is the librarian guard's live state, not a stored
-        # flag, so when the pass lands a crashed run can never leave the
-        # panel spinning; until then the guard is always None.
+        # flag, so a crashed pass can never leave the panel spinning.
+        # "last_pass" is the steer of the most recent pass — what the
+        # keywords box and focus hint said, so the panel can show what
+        # was searched for (issue #29); no pass yet reads as None.
         entries = entries_from_rows(state.project.load_related())
         entries = mark_cited(entries, state.project.read_bib())
         rows = corpus_join(entries, state.corpus.list(),
                            project=state.project.root.name)
         task = getattr(state, "related_task", None)
         return {"entries": rows,
-                "searching": task is not None and not task.done()}
+                "searching": task is not None and not task.done(),
+                "last_pass": state.project.load_related_meta() or None}
+
+    @app.post("/project/related/find")
+    async def related_find(request: Request):
+        # The one search trigger (issue #29): the librarian reads the
+        # paper and runs its own pass — the optional steer body only
+        # seeds it (keywords + a focus hint; parse_steer's defensive
+        # read, a torn body is just no steer). One at a time: a second
+        # click while a pass runs is a no-op, not a queue. The section
+        # is the sitting's anchor at click time, and the project is
+        # captured here — a switch mid-pass must not re-point the
+        # search at the new paper.
+        task = getattr(state, "related_task", None)
+        if task is not None and not task.done():
+            return {"searching": True}
+        try:
+            body = await request.json()
+        except Exception:
+            body = None  # no body, torn JSON: the pass runs unsteered
+        seeds, focus = parse_steer(body)
+        sitting = getattr(state, "sitting", None)
+        section = getattr(sitting, "selected", None) if sitting else None
+        state.related_task = spawn(
+            state, run_librarian(state, state.project, section,
+                                 seeds, focus))
+        return {"searching": True}
 
     # -- corpus doors and status (SPEC §6): upload is door 1, the agent
     # fetch/auto-join is door 2; the UI reads status, never searches.

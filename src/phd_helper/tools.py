@@ -301,10 +301,12 @@ async def execute_async(call, project: Project, resolve=resolve_bibtex,
         if on_results is not None:
             # The related-work panel records the search whole (abstracts
             # and all — the panel shows them; the tool result below stays
-            # abstract-free, §4). Best-effort like autojoin: a store fault
-            # never sinks the result the model is waiting on.
+            # abstract-free, §4), tagged with the query that surfaced it
+            # so the card can name its search (issue #29). Best-effort
+            # like autojoin: a store fault never sinks the result the
+            # model is waiting on.
             try:
-                on_results(hits)
+                on_results(hits, call.args["query"])
             except Exception:
                 pass
         if autojoin is not None:

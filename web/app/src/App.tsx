@@ -33,13 +33,14 @@ import {
   type ProjectFile,
 } from "./api/files";
 import { fetchDocument } from "./api/document";
-import { getRelated } from "./api/related";
+import { findRelated, getRelated } from "./api/related";
 import type {
   CorpusDoc,
   DocSection,
   FilePatch,
   Health,
   RelatedEntry,
+  RelatedPass,
   SectionNode,
 } from "./types";
 import { Header } from "./components/Header";
@@ -111,6 +112,9 @@ export default function App() {
   // guess — the server owns whether a pass is running.
   const [related, setRelated] = useState<RelatedEntry[]>([]);
   const [relatedSearching, setRelatedSearching] = useState(false);
+  // What the last pass was asked for (issue #29) — the door's stored
+  // truth, not a local echo: a pass started elsewhere still shows.
+  const [relatedPass, setRelatedPass] = useState<RelatedPass | null>(null);
   // The read view (SPEC §Section view): Talk/Read is a local view toggle
   // — the transcript keeps living underneath. /document rides the tick
   // only while reading, so the paper stays fresh as the agent writes.
@@ -184,6 +188,7 @@ export default function App() {
       if (rel.status === "fulfilled") {
         setRelated(rel.value.entries);
         setRelatedSearching(rel.value.searching);
+        setRelatedPass(rel.value.last_pass);
       }
     };
     const go = () => {
@@ -473,6 +478,16 @@ export default function App() {
             onPin={(id) => void pin(id).catch(() => {})}
             onUnpin={(id) => void unpin(id).catch(() => {})}
             onCite={(e) => send(citeText(e, state.selected))}
+            lastPass={relatedPass}
+            // The one search trigger (issue #29): the door answers at
+            // once and the pass reports through the notice event; the
+            // optimistic flag is confirmed by the next tick. The steer
+            // box's keywords and focus ride along — they seed the
+            // agent's planning, the agent still runs every search.
+            onFind={(keywords, focus) => {
+              setRelatedSearching(true);
+              void findRelated(keywords, focus).catch(notice("Find papers"));
+            }}
           />
           <FilesPanel
             files={files}

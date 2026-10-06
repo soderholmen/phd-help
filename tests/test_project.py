@@ -265,3 +265,23 @@ def test_a_missing_or_torn_related_file_reads_as_empty(paper):
     (paper.root / ".phd-helper" / "related.json").write_text(
         '["not", "the", "shape"]', encoding="utf-8")
     assert paper.load_related() == []
+    assert paper.load_related_meta() == {}
+
+
+def test_the_store_keeps_the_last_pass_steer(paper):
+    # "so we know what we have searched for" (issue #29): the pass's
+    # keywords and focus ride the store beside the entries.
+    steer = {"keywords": ["maritime jcf"], "focus": "IEEE venues",
+             "at": "2026-10-05 19:40"}
+    paper.save_related([{"title": "T"}], meta=steer)
+    assert paper.load_related() == [{"title": "T"}]
+    assert paper.load_related_meta() == steer
+
+
+def test_an_entry_only_save_keeps_the_steer_of_the_last_pass(paper):
+    # A later plain search must not erase what the librarian was asked
+    # for: the meta rides across entry-only writes.
+    steer = {"keywords": ["k"], "focus": "", "at": "now"}
+    paper.save_related([{"title": "A"}], meta=steer)
+    paper.save_related([{"title": "A"}, {"title": "B"}])
+    assert paper.load_related_meta() == steer

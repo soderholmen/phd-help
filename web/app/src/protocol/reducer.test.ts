@@ -57,6 +57,20 @@ describe("connection", () => {
     });
   });
 
+  it("a background notice lands as a transcript line", () => {
+    // The librarian pass speaks outside any turn — same fold as the
+    // recap, so the toast effect floats it like every other notice.
+    const s = fold({
+      type: "notice",
+      text: "Search pass: 3 papers added to Related work",
+    });
+    expect(s.messages.at(-1)).toMatchObject({
+      role: "notice",
+      text: "Search pass: 3 papers added to Related work",
+    });
+    expect(s.turnActive).toBe(false); // a notice is not a turn
+  });
+
   it("session_ended clears the anchor, keeps the cards, notices the recap", () => {
     const s = fold(
       { type: "section_selected", section: "sections/intro.tex" },

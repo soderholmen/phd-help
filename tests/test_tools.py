@@ -298,12 +298,14 @@ async def test_autojoin_failure_never_sinks_the_search_result(paper):
 # -- related-work recording (docs/related-work.md): the panel sees searches
 
 @pytest.mark.anyio
-async def test_web_search_reports_the_whole_hits_to_the_panel(paper):
+async def test_web_search_reports_the_whole_hits_and_query_to_the_panel(paper):
     seen = []
     result = await execute_async(
         call("web_search", {"query": "mesh anything"}), paper,
-        search=fake_search(HITS), on_results=seen.append)
-    assert [h.arxiv for h in seen[0]] == ["2401.00002"]
+        search=fake_search(HITS),
+        on_results=lambda hits, query: seen.append((hits, query)))
+    assert [h.arxiv for h in seen[0][0]] == ["2401.00002"]
+    assert seen[0][1] == "mesh anything"  # the card names its search (#29)
     # the model's result is built field-by-field and stays abstract-free
     # (§4 budget); the panel gets the whole hits through the callback.
     assert "abstract" not in result["results"][0]
@@ -311,7 +313,7 @@ async def test_web_search_reports_the_whole_hits_to_the_panel(paper):
 
 @pytest.mark.anyio
 async def test_a_store_fault_never_sinks_the_search_result(paper):
-    def on_results(hits):
+    def on_results(hits, query):
         raise RuntimeError("disk full")
     result = await execute_async(
         call("web_search", {"query": "mesh anything"}), paper,

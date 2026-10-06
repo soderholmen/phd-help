@@ -41,6 +41,10 @@ export type ServerEvent =
   | { type: "tts_stopped" }
   | { type: "section_selected"; section: string | null }
   | { type: "recap"; text: string }
+  // A background pass speaking outside any turn (the librarian,
+  // issue #29): the same transcript fold as the recap, fanned only
+  // while the server's project is still the one the pass started on.
+  | { type: "notice"; text: string }
   | { type: "session_ended"; reason: string; recap: string };
 
 // Client → server control frames (voice.py CONTROL_TYPES).
@@ -145,12 +149,22 @@ export interface RelatedEntry {
   why: string;
   found_by: string;
   cited: boolean;
+  query: string; // the search that surfaced it (issue #29)
   in_corpus: { doc_id: string; status: string; pinned_here: boolean } | null;
+}
+
+// The steer of the most recent librarian pass — what the keywords box
+// and focus hint said, and when (issue #29).
+export interface RelatedPass {
+  keywords: string[];
+  focus: string;
+  at: string;
 }
 
 export interface RelatedList {
   entries: RelatedEntry[];
   searching: boolean;
+  last_pass: RelatedPass | null;
 }
 
 // /health shape.

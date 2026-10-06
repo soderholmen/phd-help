@@ -53,6 +53,11 @@ export function reducer(state: ShellState, event: ShellEvent): ShellState {
     case "recap":
       // §7: the one-line on-screen recap of how the last sitting ended.
       return withMessage(state, "notice", event.text);
+    case "notice":
+      // A background pass (the librarian, issue #29) speaks outside any
+      // turn: the exact recap fold — transcript line, and the toast
+      // effect floats it because in Read/Source the transcript is gone.
+      return withMessage(state, "notice", event.text);
     case "session_ended":
       // The sitting ended (switch/shutdown/idle). The anchor was
       // sitting-level, so it clears; the diff cards stay — the diffs are

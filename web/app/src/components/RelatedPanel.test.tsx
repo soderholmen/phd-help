@@ -14,6 +14,7 @@ const entry = (over: Partial<RelatedEntry>): RelatedEntry => ({
   why: "",
   found_by: "search",
   cited: false,
+  query: "",
   in_corpus: null,
   ...over,
 });
@@ -112,5 +113,92 @@ describe("RelatedPanel", () => {
       <RelatedPanel entries={[]} searching {...noop} onFind={onFind} />,
     );
     expect(screen.getByRole("button", { name: /Searching/ })).toBeDisabled();
+  });
+
+  it("a long abstract clamps to a preview and more opens it in place", () => {
+    const long = "A long abstract about mesh generation. ".repeat(12).trim();
+    render(<RelatedPanel entries={[entry({ abstract: long })]} {...noop} />);
+    fireEvent.click(screen.getByRole("button", { name: "more" }));
+    expect(screen.getByRole("button", { name: "less" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "less" }));
+    expect(screen.getByRole("button", { name: "more" })).toBeInTheDocument();
+  });
+
+  it("a short abstract needs no more button", () => {
+    render(
+      <RelatedPanel
+        entries={[entry({ abstract: "Short and complete." })]}
+        {...noop}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "more" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("Open links to the arXiv page, and to the DOI when there is no id", () => {
+    const { rerender } = render(
+      <RelatedPanel entries={[entry({})]} {...noop} />,
+    );
+    expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute(
+      "href",
+      "https://arxiv.org/abs/2401.00002",
+    );
+    rerender(
+      <RelatedPanel
+        entries={[entry({ arxiv: "", doi: "10.1000/x" })]}
+        {...noop}
+      />,
+    );
+    expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute(
+      "href",
+      "https://doi.org/10.1000/x",
+    );
+    // no id, nothing to open — a dead link is worse than none
+    rerender(
+      <RelatedPanel entries={[entry({ arxiv: "", doi: "" })]} {...noop} />,
+    );
+    expect(
+      screen.queryByRole("link", { name: "Open" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("a card names the query that found it", () => {
+    render(
+      <RelatedPanel entries={[entry({ query: "maritime jcf" })]} {...noop} />,
+    );
+    expect(screen.getByText(/maritime jcf/)).toBeInTheDocument();
+  });
+
+  it("the steer box hands keywords and focus to Find", () => {
+    const onFind = vi.fn();
+    render(<RelatedPanel entries={[]} {...noop} onFind={onFind} />);
+    fireEvent.change(screen.getByLabelText("Keywords"), {
+      target: { value: "maritime jcf, ship traffic" },
+    });
+    fireEvent.change(screen.getByLabelText("Where to search"), {
+      target: { value: "IEEE venues" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Find papers" }));
+    expect(onFind).toHaveBeenCalledWith(
+      ["maritime jcf", "ship traffic"],
+      "IEEE venues",
+    );
+  });
+
+  it("the header says what the last pass searched for", () => {
+    render(
+      <RelatedPanel
+        entries={[]}
+        {...noop}
+        lastPass={{
+          keywords: ["maritime jcf"],
+          focus: "IEEE venues",
+          at: "2026-10-05 19:40",
+        }}
+      />,
+    );
+    expect(screen.getByText(/maritime jcf/)).toBeInTheDocument();
+    expect(screen.getByText(/IEEE venues/)).toBeInTheDocument();
   });
 });

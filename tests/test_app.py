@@ -7,6 +7,7 @@ import asyncio
 import json
 import shutil
 import time
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,7 +23,8 @@ from phd_helper.project import Project
 from phd_helper import gitrepo, sessionlog
 from phd_helper.saytext import for_speech, strip_fences
 from phd_helper.server.app import (Session, create_app, end_sitting,
-                                   ensure_sitting, idle_expired)
+                                   ensure_sitting, idle_expired,
+                                   parse_steer, run_librarian)
 from phd_helper.server.config import Config
 from phd_helper.server.llm import LlmError
 from phd_helper.server.voice import StubStt, StubTts
@@ -2586,7 +2588,8 @@ def test_the_related_door_says_empty_on_a_fresh_project(tmp_path):
     with TestClient(create_app(state=state)) as client:
         r = client.get("/project/related")
     assert r.status_code == 200
-    assert r.json() == {"entries": [], "searching": False}
+    assert r.json() == {"entries": [], "searching": False,
+                        "last_pass": None}
 
 
 @pytest.mark.anyio
@@ -2614,6 +2617,224 @@ async def test_a_turns_web_search_lands_in_the_related_store(tmp_path):
     assert [e["title"] for e in entries] == ["Mesh Anything"]
     assert entries[0]["abstract"] == "A generative model"
     assert entries[0]["found_by"] == "search"
+
+
+# -- the librarian pass (docs/related-work.md, issue #29) --------------------
+# The pass is proven by calling run_librarian directly (the gist-refresh
+# discipline): the door's job — one-at-a-time, project capture — is
+# tested separately, so the model choreography never waits on a portal.
+
+
+def oa_body(title, arxiv):
+    return json.dumps({"results": [{
+        "display_name": title, "publication_year": 2024,
+        "doi": f"https://doi.org/10.48550/arXiv.{arxiv}",
+        "authorships": [{"author": {"display_name": "Jane Doe"}}],
+        "primary_location": None}]})
+
+
+def librarian_env(tmp_path, script, by_query):
+    """make_env plus a fetch that answers each OpenAlex search with the
+    work named for that query (the arXiv ti: leg stays empty — the
+    OpenAlex leg carries the fixture)."""
+    state, _ = make_env(tmp_path)
+    state.llm = ScriptLlm(script)
+    state.ingestor = None  # autojoin degrades; no MinerU in tests
+    seen: list[str] = []
+
+    async def fetch(url, headers=None):
+        if "openalex.org/works" not in url:
+            return Response(200, "<feed/>")
+        q = parse_qs(urlparse(url).query)["search"][0]
+        seen.append(q)
+        title, arxiv = by_query[q]
+        return Response(200, oa_body(title, arxiv))
+
+    state.fetch = fetch
+    return state, seen
+
+
+class CapturingSitting:
+    """The door's fan target, duck-typed: run_librarian only sends."""
+
+    def __init__(self):
+        self.events: list[dict] = []
+
+    async def send(self, event):
+        self.events.append(event)
+
+
+TWO = {"transformer baseline": ("Attention Is All You Need", "1706.03762"),
+       "mesh generation": ("Mesh Anything", "2401.00002")}
+
+
+@pytest.mark.anyio
+async def test_the_librarian_plans_queries_and_lands_ranked_cards(tmp_path):
+    state, seen = librarian_env(tmp_path, [
+        text_step('["transformer baseline", "mesh generation"]'),
+        text_step('[{"i": 1, "why": "closest mesh work"},'
+                  ' {"i": 0, "why": "the attention baseline"}]'),
+    ], TWO)
+    await run_librarian(state, state.project, "sections/intro.tex")
+    assert seen == ["transformer baseline", "mesh generation"]
+    # the plan read the paper: the skeleton and the anchored section
+    joined = "\n".join(m.get("content") or "" for m in state.llm.calls[0])
+    assert "My Paper" in joined and "Intro body prose" in joined
+    # the ranking read the candidates, numbered
+    joined = "\n".join(m.get("content") or "" for m in state.llm.calls[1])
+    assert "Attention Is All You Need" in joined and "Mesh Anything" in joined
+    entries = state.project.load_related()
+    # the model's rank, not search order: it put candidate 1 first
+    assert [e["title"] for e in entries] == ["Mesh Anything",
+                                            "Attention Is All You Need"]
+    assert [e["found_by"] for e in entries] == ["librarian", "librarian"]
+    assert entries[0]["why"] == "closest mesh work"
+
+
+@pytest.mark.anyio
+async def test_the_librarian_survives_a_fenced_plan_and_drops_cited(tmp_path):
+    # The fence is model chatter, not a fault; the cited paper is gone
+    # before ranking — the only candidate dropped leaves nothing to
+    # rank, so the fit call never happens and the store stays empty.
+    state, seen = librarian_env(tmp_path, [
+        text_step('Sure!\n```json\n["transformer baseline"]\n```'),
+        text_step('[{"i": 0, "why": "still worth a look"}]'),
+    ], TWO)
+    (state.project.root / "refs.bib").write_text(
+        "@inproceedings{v,\n  title={Attention Is All You Need},\n"
+        "  eprint={1706.03762}\n}\n", encoding="utf-8")
+    await run_librarian(state, state.project, None)
+    assert seen == ["transformer baseline"]  # the fence was eaten
+    assert len(state.llm.calls) == 1        # nothing left to rank
+    assert state.project.load_related() == []
+
+
+@pytest.mark.anyio
+async def test_a_fit_rank_fault_falls_back_to_search_order(tmp_path):
+    # A rank reply that is not JSON is a degraded pass, not a dead
+    # panel: search order lands, and the why names the query honestly.
+    state, _ = librarian_env(tmp_path, [
+        text_step('["transformer baseline", "mesh generation"]'),
+        text_step("I'm sorry, I cannot rank these for you."),
+    ], TWO)
+    await run_librarian(state, state.project, None)
+    entries = state.project.load_related()
+    assert [e["title"] for e in entries] == ["Attention Is All You Need",
+                                            "Mesh Anything"]
+    assert entries[0]["why"] == "top of query 'transformer baseline'"
+    assert entries[0]["found_by"] == "librarian"
+
+
+@pytest.mark.anyio
+async def test_an_unparseable_plan_ends_the_pass_with_a_notice(tmp_path):
+    state, _ = librarian_env(tmp_path, [text_step("I have no queries today.")],
+                            TWO)
+    sitting = CapturingSitting()
+    state.sitting = sitting
+    await run_librarian(state, state.project, None)
+    assert [e["type"] for e in sitting.events] == ["notice"]
+    assert "search pass" in sitting.events[0]["text"].lower()
+    assert state.project.load_related() == []
+
+
+@pytest.mark.anyio
+async def test_the_pass_notice_is_silenced_by_a_project_switch(tmp_path):
+    # The guard is project identity: a switch mid-pass means the
+    # sitting now speaks for a different paper, and the old paper's
+    # search result is noise in that conversation (§7). A sitting on
+    # the same paper still hears it — it is that paper's pass.
+    state, _ = librarian_env(tmp_path, [text_step("no queries")], TWO)
+    sitting = CapturingSitting()
+    state.sitting = sitting
+    await run_librarian(state, Project(state.project.root), None)
+    assert sitting.events == []  # not this project's pass
+    await run_librarian(state, state.project, None)
+    assert [e["type"] for e in sitting.events] == ["notice"]
+
+
+def test_find_starts_a_pass_and_the_door_answers_searching(tmp_path):
+    state = ws_state(tmp_path)
+    with TestClient(create_app(state=state)) as client:
+        r = client.post("/project/related/find")
+    assert r.status_code == 200
+    assert r.json() == {"searching": True}
+    assert state.related_task is not None
+
+
+def test_a_second_find_while_one_runs_is_a_noop(tmp_path):
+    state = ws_state(tmp_path)
+
+    class Busy:  # duck-typed guard: the door only ever asks done()
+        def done(self):
+            return False
+
+    guard = Busy()
+    state.related_task = guard
+    with TestClient(create_app(state=state)) as client:
+        r = client.post("/project/related/find")
+    assert r.status_code == 200
+    assert r.json() == {"searching": True}
+    assert state.related_task is guard  # the running pass was not replaced
+
+
+@pytest.mark.anyio
+async def test_the_librarian_folds_the_writers_steer_into_its_plan(tmp_path):
+    # The keyword box and the focus hint are seeds for the agent's own
+    # planning (issue #29): they reach the plan prompt, the card names
+    # the query it came from, and the pass records what it was asked.
+    state, _ = librarian_env(tmp_path, [
+        text_step('["maritime jcf", "ship traffic"]'),
+        text_step('[{"i": 0, "why": "the JCF maritime application"}]'),
+    ], {"maritime jcf": ("Attention Is All You Need", "1706.03762"),
+        "ship traffic": ("Mesh Anything", "2401.00002")})
+    await run_librarian(state, state.project, None,
+                        seeds=["maritime jcf"], focus="IEEE venues")
+    joined = "\n".join(m.get("content") or "" for m in state.llm.calls[0])
+    assert "maritime jcf" in joined and "IEEE venues" in joined
+    entries = state.project.load_related()
+    assert entries[0]["query"] == "maritime jcf"
+    meta = state.project.load_related_meta()
+    assert meta["keywords"] == ["maritime jcf"]
+    assert meta["focus"] == "IEEE venues" and meta["at"]
+
+
+@pytest.mark.anyio
+async def test_a_turns_search_card_names_the_query_that_found_it(tmp_path):
+    state, session, events = pending_env(tmp_path, [
+        tool_step("web_search", {"query": "mesh anything"}),
+        text_step("Found one."),
+    ])
+    oa = oa_body("Mesh Anything", "2401.00002")
+
+    async def fetch(url, headers=None):
+        return Response(200, oa if "openalex" in url else "<feed/>")
+
+    state.fetch = fetch
+    await session.run_turn("find mesh anything papers")
+    assert state.project.load_related()[0]["query"] == "mesh anything"
+
+
+def test_the_find_door_reads_the_steer_body_defensively():
+    # Model-free input, but still untrusted HTTP: a torn body reads as
+    # no steer, keywords are trimmed strings capped at eight, the focus
+    # hint is capped — never a 500 on the door.
+    kws, focus = parse_steer({"keywords": ["a", " b ", 5, ""],
+                              "focus": "x" * 999})
+    assert kws == ["a", "b", "5"] and len(focus) <= 300
+    assert parse_steer(None) == ([], "")
+    assert parse_steer("not a dict") == ([], "")
+    assert parse_steer({"keywords": "one phrase"}) == (["one phrase"], "")
+
+
+def test_the_related_door_reports_the_last_pass_steer(tmp_path):
+    state = ws_state(tmp_path)
+    state.project.save_related(
+        [{"title": "T"}],
+        meta={"keywords": ["k"], "focus": "f", "at": "2026-10-05"})
+    with TestClient(create_app(state=state)) as client:
+        r = client.get("/project/related")
+    assert r.json()["last_pass"] == {"keywords": ["k"], "focus": "f",
+                                     "at": "2026-10-05"}
 
 
 def test_projects_download_zip(tmp_path):

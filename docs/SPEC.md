@@ -103,7 +103,7 @@ Every decision here was made on the [wayfinder map](https://github.com/soderholm
 ### Per-turn context assembly
 
 - Selected **section in full** + **paper skeleton** (title, abstract, all headings, one-line gist per section; gists auto-regenerate whenever a section file changes) + **paper memory** (persistent decisions/claims/terminology/TODOs; distilled at session end and on voice command; user-editable side panel; a few hundred tokens) + conversation history (verbatim until budget, then per-section rolling summaries).
-- **Pinned sources** attached to the section always contribute abstract + headings; chunk-searched for detail. New corpus/web searches are agent tool calls, never auto-stuffed.
+- **Pinned sources** attached to the section always contribute abstract + headings; chunk-searched for detail. New corpus/web searches are agent tool calls, never auto-stuffed. (The Related work panel is a surface for those discoveries, not context: its entries never enter per-turn assembly — [issue #29](https://github.com/soderholmen/phd-help/issues/29).)
 - **Fixed drop-priority** (assembly is a priority list, window-agnostic): never drop the selected section, paper memory, or skeleton; drop in order — pinned-paper abstracts/headings → conversation beyond the rolling summary → far-away section gists.
 
 ### Cleanup pass
@@ -158,7 +158,7 @@ A dedicated fast transformation (fixed-format task, fast sampling config) turns 
 - **Embeddings**: harrier-oss-v1-0.6b (MIT); upgrade path harrier-oss-v1-27b or Qwen3-Embedding-8B served on the server.
 - **Store**: embedded **LanceDB** — Tantivy FTS (BM25) + vector + RRF fusion in one library call, no server; rerank (Qwen3-Reranker-0.6B over the fused top-50) rides as a second stage on the store side, since LanceDB has no native reranker. Brute-force vectors are fine at this scale (~10⁵ chunks).
 - **One global index** across projects; pinned docs boosted, not filtered.
-- **Agent-facing only**: `corpus_search(query, k, boost_pinned)` → ranked chunks with page/block locators + doc ids; `corpus_doc(doc_id)` → abstract, headings, bib status. Locators are what let the agent cite precisely and say "§3.2 of the parakeet paper" in voice. **No user-facing search UI** — the user asks the agent by voice.
+- **Agent-facing only**: `corpus_search(query, k, boost_pinned)` → ranked chunks with page/block locators + doc ids; `corpus_doc(doc_id)` → abstract, headings, bib status. Locators are what let the agent cite precisely and say "§3.2 of the parakeet paper" in voice. **No user-facing search UI** — the user asks the agent by voice. *(Amended by [Related work panel](https://github.com/soderholmen/phd-help/issues/29): the Related work panel surfaces what the agent's searches found, and one **Find papers** trigger runs the agent's own librarian pass; its keywords/focus box seeds that pass. Still no search box — the user never searches, the agent does.)*
 
 ### Academic-first search and the cite loop
 

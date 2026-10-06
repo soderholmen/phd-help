@@ -141,25 +141,44 @@ class Project:
 
     # -- related work store (docs/related-work.md) ----------------------------
 
-    def load_related(self) -> list:
-        """[{"entries": […]}]; a missing, torn or wrong-shaped file reads
-        as an empty list — the panel shows its empty state, never a
-        failed door (§8)."""
+    def _related_data(self) -> dict:
         try:
             data = json.loads(
                 (self.state_dir / "related.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return []
-        entries = data.get("entries") if isinstance(data, dict) else None
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def load_related(self) -> list:
+        """[{"entries": […]}]; a missing, torn or wrong-shaped file reads
+        as an empty list — the panel shows its empty state, never a
+        failed door (§8)."""
+        entries = self._related_data().get("entries")
         return entries if isinstance(entries, list) else []
 
-    def save_related(self, entries: list) -> None:
+    def load_related_meta(self) -> dict:
+        """The last librarian pass's steer — {"keywords", "focus", "at"}
+        — so the panel can say what was searched for (issue #29). The
+        same torn-file posture as load_related: nothing, never a fault."""
+        meta = self._related_data().get("last_pass")
+        return meta if isinstance(meta, dict) else {}
+
+    def save_related(self, entries: list, meta: dict | None = None) -> None:
         # Atomic replace (the save_gists rule): the librarian's write and
-        # a tick's read must never meet a half-written list.
+        # a tick's read must never meet a half-written list. An
+        # entry-only save keeps the last pass's steer: a later plain
+        # search must not erase what the librarian was asked for.
+        if meta is None:
+            old = self._related_data().get("last_pass")
+            if isinstance(old, dict):
+                meta = old
+        payload = {"entries": entries}
+        if meta is not None:
+            payload["last_pass"] = meta
         self.state_dir.mkdir(parents=True, exist_ok=True)
         tmp = self.state_dir / "related.json.tmp"
-        tmp.write_text(json.dumps({"entries": entries},
-                                  ensure_ascii=False), encoding="utf-8")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False),
+                       encoding="utf-8")
         tmp.replace(self.state_dir / "related.json")
 
     def read_bib(self) -> str:
