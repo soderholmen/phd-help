@@ -684,6 +684,24 @@ button { font: inherit; color: inherit; }
   line-clamp: 2;
   overflow: hidden;
 }
+/* the card's own expand (issue #29): the clamp releases in place —
+   without this rule the more/less toggle changes a class and nothing
+   else (jsdom never noticed, so no test could have either) */
+.related .abs.open { -webkit-line-clamp: unset; line-clamp: unset; }
+.related .more {
+  justify-self: start;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  text-decoration: underline;
+}
+.related .steer { display: flex; gap: var(--sp-2); }
+.related .steer .input { flex: 1; min-width: 0; font-size: var(--fs-sm); }
+.related .lastpass { color: var(--text-muted); font-size: var(--fs-xs); }
+.related a.btn { text-decoration: none; }
 .st.cited { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
 
 /* File doors (#28): the same shape as the corpus list, smaller stakes. */

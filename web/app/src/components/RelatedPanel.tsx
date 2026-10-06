@@ -150,12 +150,14 @@ export function RelatedPanel({
       {onFind && (
         <div className="steer">
           <input
+            className="input"
             aria-label="Keywords"
             placeholder="keywords, comma separated"
             value={kws}
             onChange={(ev) => setKws(ev.target.value)}
           />
           <input
+            className="input"
             aria-label="Where to search"
             placeholder="where to look (optional)"
             value={focus}
