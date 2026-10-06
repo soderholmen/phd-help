@@ -248,15 +248,27 @@ class KokoroTtsStream:
         self._ended = True
         for task in self._tasks:
             task.cancel()               # stop paying for unplayed audio
+        self._retrieve()
         self._more.set()
+
+    def _retrieve(self) -> None:
+        # A task that already failed before the cancel needs its
+        # exception retrieved, or asyncio logs "Task exception was
+        # never retrieved" when it is collected.
+        for t in self._tasks:
+            if t.done() and not t.cancelled():
+                t.exception()
 
     async def chunks(self):
         i = 0
         while True:
             if i >= len(self._tasks):
                 if self._ended:
-                    if not self._aborted:
-                        self._tts._failures = 0  # a clean stream self-heals
+                    # Only a stream that actually spoke heals (Moss
+                    # heals after a real audio read): a silent turn over
+                    # a down kokoro must not reset the strikes.
+                    if not self._aborted and self._tasks:
+                        self._tts._failures = 0
                     return
                 self._more.clear()      # no await between check and wait:
                 await self._more.wait()  # a push can never be missed
@@ -275,6 +287,7 @@ class KokoroTtsStream:
                     self._tts._failures += 1
                 for t in self._tasks[i:]:
                     t.cancel()
+                self._retrieve()
                 return                  # §8: screen-only; chunks END
             if data:
                 yield data

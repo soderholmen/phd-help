@@ -47,10 +47,11 @@ def test_audio_sidecar_urls_default_to_loopback():
     assert c.tts_url == "http://127.0.0.1:8083"
 
 
-def test_tts_backend_defaults_to_kokoro(monkeypatch):
+def test_tts_backend_defaults_to_kokoro():
     # The shared kokoro-fastapi instance (:8880, CPU, no VRAM) is the
     # default voice; MOSS stays selectable (docs/audio-stack.md).
-    monkeypatch.delenv("PHD_TTS", raising=False)
+    # Class-body env read like the other string selectors (audio_stack,
+    # vad_engine): fixed at import, so no monkeypatch to pretend here.
     assert Config().tts_backend == "kokoro"
 
 

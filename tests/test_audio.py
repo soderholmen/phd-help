@@ -926,7 +926,7 @@ async def test_kokoro_stream_speaks_each_pushed_sentence_in_order():
 
 
 @pytest.mark.anyio
-async def test_kokoro_stream_keeps_order_when_the_second_sentence_finishes_first():
+async def test_kokoro_keeps_order_when_the_second_sentence_finishes_first():
     # Per-sentence requests race; the wire must still play them in
     # sentence order — the episode's PCM is one continuous buffer.
     async def handler(request):
@@ -999,6 +999,31 @@ async def test_kokoro_clean_stream_resets_the_fault_counter():
         await s.finish()
         [c async for c in s.chunks()]
     assert not tts.faulted()
+
+
+@pytest.mark.anyio
+async def test_kokoro_a_silent_turn_does_not_heal_the_fault_counter():
+    # Only a stream that actually spoke heals (Moss heals after a real
+    # audio read): a whitespace turn over a down kokoro made no request
+    # and must not reset the strikes.
+    def handler(request):
+        raise httpx.ConnectError("kokoro down", request=request)
+
+    tts = make_kokoro(handler)
+    s = tts.stream()                             # strike 1
+    await s.push("x")
+    await s.finish()
+    [c async for c in s.chunks()]
+    s = tts.stream()                             # silent turn, no network
+    await s.push("   ")
+    await s.finish()
+    assert [c async for c in s.chunks()] == []
+    for _ in range(2):                           # strikes 2 and 3 stand
+        s = tts.stream()
+        await s.push("x")
+        await s.finish()
+        [c async for c in s.chunks()]
+    assert tts.faulted()
 
 
 @pytest.mark.anyio
