@@ -124,6 +124,17 @@ class Config:
             "PHD_TTS_PROMPT_WAV",
             str(REPO_ROOT / ".probe" / "MOSS-TTS" / "assets" / "audio"
                 / "reference_en_0.mp3")))
+    # Which voice answers: "kokoro" is the shared kokoro-fastapi instance
+    # (OpenAI /v1/audio/speech — CPU, no VRAM, already serving voicemode
+    # on this box); "moss" is the MOSS-TTS-Realtime sidecar above. The
+    # default flipped to kokoro after the MOSS worker was caught dropping
+    # pushes on backend-driven sessions (docs/audio-stack.md).
+    tts_backend: str = os.environ.get("PHD_TTS", "kokoro")
+    kokoro_url: str = field(
+        default_factory=lambda: os.environ.get(
+            "PHD_KOKORO_URL", "http://127.0.0.1:8880"))
+    kokoro_voice: str = field(
+        default_factory=lambda: os.environ.get("PHD_KOKORO_VOICE", "af_sky"))
     vad_threshold: float = field(default_factory=_vad_threshold)
     # Live partials (docs/audio-stack.md): the streaming sidecar answers
     # a growing hypothesis per utterance-so-far. Default ON — the probe
@@ -174,6 +185,10 @@ class Config:
             raise ValueError(
                 f"PHD_VAD must be 'silero' or 'energy', "
                 f"got {self.vad_engine!r}")
+        if self.tts_backend not in ("kokoro", "moss"):
+            raise ValueError(
+                f"PHD_TTS must be 'kokoro' or 'moss', "
+                f"got {self.tts_backend!r}")
 
     def sampling(self, thinking: bool) -> dict:
         return THINKING_SAMPLING if thinking else PLAIN_SAMPLING

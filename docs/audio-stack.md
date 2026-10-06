@@ -53,19 +53,25 @@ inductor; absent means TritonMissing).
 
 ```powershell
 .venv-asr/Scripts/python.exe scripts/asr_server.py --port 8090   # loads lazily, ~7 s first call
-.venv-tts/Scripts/python.exe scripts/tts_server.py --port 8083   # ~9 s to /health
+.venv-tts/Scripts/python.exe scripts/tts_server.py --port 8083   # only for PHD_TTS=moss (see "The voice swap")
 .venv-asr/Scripts/python.exe scripts/partials_server.py --port 8092  # lazy load, CPU fp32
 # backend
 set PHD_AUDIO_STACK=local
 ```
 
+The default voice is the kokoro-fastapi instance on `:8880` (voicemode's
+TTS service — CPU, no VRAM, no launcher here; if `/health` on `:8880`
+doesn't answer, start voicemode's Kokoro service first).
+
 `/health` then reports `"stt": "ok", "tts": "ok"` (live-probed; `"stub"`
 while the gate is off, `"faulted"` after three consecutive failures —
 which self-heal on the next success).
 
-**VRAM budget (16.3 GB):** MOSS ~11.5 + parakeet bf16 ~2.5 + MinerU ~2.8
-— all three do not fit. Stop MinerU during voice sessions; OOM surfaces
-as sidecar 500 → `faulted`, never as a silent lie.
+**VRAM budget (16.3 GB):** with the default kokoro voice the TTS row is
+zero (CPU ONNX); MOSS ~11.5 only rides when `PHD_TTS=moss`. Parakeet
+bf16 ~2.5 + MinerU ~2.8 fit alongside kokoro; under MOSS all three do
+not fit — stop MinerU during voice sessions. OOM surfaces as sidecar
+500 → `faulted`, never as a silent lie.
 
 ## Verify
 
@@ -117,8 +123,9 @@ grows every second and never shrinks.
 The endpoint holder hears replies **as they are generated**: `run_turn`
 pumps the vLLM SSE stream through `SentenceGate` (`sentences.py` — the
 boundary rules bend around LaTeX: braces, `$…$`, abbreviations,
-decimals), pushes each completed sentence to the MOSS session
-(`/tts/session/push`, `is_final=False`), and an `AudioEpisode`
+decimals), hands each completed sentence to the voice (kokoro: one
+`/v1/audio/speech` request per sentence; MOSS: `/tts/session/push`,
+`is_final=False`), and an `AudioEpisode`
 forwarder streams the PCM16 to the holder's socket between
 `audio_start{sample_rate}` and `audio_end` (view-only tabs get text
 only — audio follows the mic). Generation and synthesis overlap, so
@@ -142,14 +149,49 @@ Barge-in: 200 ms of sustained AEC'd mic while playing pauses the
 playhead instantly and sends the control; while the agent is still
 composing the server **cancels the turn** and fans out `tts_stopped`,
 which hard-stops every player and kills its resume window. The
-cancelled turn's sidecar session is closed too (`abort()` → `/close`):
-the worker is single-threaded, so an abandoned turn would otherwise
-keep synthesizing its queued sentences — and force-finish into a
-garbled tail — ahead of the next turn on the same queue; deleting the
-session hands the next turn a fresh worker. Once the
+cancelled turn's sidecar work is stopped too — on MOSS, `abort()` →
+`/close` deletes the session: the worker is single-threaded, so an
+abandoned turn would otherwise keep synthesizing its queued sentences —
+and force-finish into a garbled tail — ahead of the next turn on the
+same queue, and deleting it hands the next turn a fresh worker; on
+kokoro, `abort()` just cancels the unplayed sentence tasks. Once the
 reply is fully composed — audio draining, or the turn already done —
 there is nothing to un-ring: the control is a no-op and the client's
 2.5 s resume window governs the buffered audio (SPEC §3).
+
+### The voice swap: kokoro by default (2026-10-06)
+
+The live complaint was "it does not talk back, only in text": the MOSS
+sidecar's worker logged `[session_worker_warning] push_text ignored: no
+active turn` ×27 across backend-driven turns — pushes dropped, silence
+on the wire — while a direct probe of the same sidecar (start → push →
+is_final, audio GET in parallel) synthesized 106 KB in 1.1 s. The fault
+is in the session interleaving, MOSS-side, and the vendored worker is
+not ours to fix cheaply. The swap: `KokoroTts` on the same duck-typed
+provider seam (`stream()/push/finish/abort/chunks`, `sample_rate`,
+`faulted()`, `healthy()`), so `AudioEpisode` and the shell never learned
+the difference.
+
+- **The instance:** kokoro-fastapi on `:8880` — the OpenAI-compatible
+  `/v1/audio/speech` server voicemode already runs on this box. Kokoro
+  is an 82 M ONNX model on CPU: no VRAM, no warm-up, no session worker
+  to strand. `response_format=pcm` is raw s16le mono at 24 kHz (the
+  response carries no header, so the adapter declares the rate).
+- **The shape:** one bounded request per completed sentence, fired at
+  push time (generation/synthesis overlap preserved); `chunks()` awaits
+  the requests in sentence order, so out-of-order completions never
+  scramble the PCM. `abort()` is purely local — cancel the unfinished
+  sentence tasks; there is no worker to close out of.
+- **The knobs:** `PHD_TTS=kokoro|moss` (default kokoro),
+  `PHD_KOKORO_URL` (default `http://127.0.0.1:8880`),
+  `PHD_KOKORO_VOICE` (default `af_sky`, voicemode's voice on this box).
+  `PHD_TTS=moss` restores the incremental session path with every MOSS
+  knob intact — the adapter and `scripts/tts_server.py` stay in-tree.
+- **Not hidden:** the MOSS session bug is sidestepped, not fixed; the
+  root cause (why `turn_active` never lands for backend sessions while
+  a direct probe works) is still open in `.probe` notes. Kokoro's voice
+  is a different voice than the MOSS clone — one timbre per model, no
+  prompt-audio cloning on this seam.
 
 Honest deviations, stated not hidden:
 

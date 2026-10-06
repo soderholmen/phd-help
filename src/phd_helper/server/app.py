@@ -668,7 +668,7 @@ class AppState:
         if self.config.audio_stack == "local":
             from phd_helper.segmenting import EnergyVad
             from phd_helper.server.stt import SidecarStt
-            from phd_helper.server.tts import MossTts
+            from phd_helper.server.tts import KokoroTts, MossTts
             self.stt = SidecarStt(
                 self.config.stt_url,
                 vad=EnergyVad(threshold=self.config.vad_threshold),
@@ -678,8 +678,16 @@ class AppState:
                 on_partial=self.emit_partial if self.config.partials
                 else None,
                 partials_url=self.config.partials_url)
-            self.tts = MossTts(self.config.tts_url,
-                               self.config.tts_prompt_wav)
+            # The voice switch (PHD_TTS): kokoro is the shared CPU
+            # instance (no VRAM, no session worker to strand — the MOSS
+            # sidecar was dropping pushes on backend-driven sessions;
+            # docs/audio-stack.md). MossTts stays selectable.
+            if self.config.tts_backend == "kokoro":
+                self.tts = KokoroTts(self.config.kokoro_url,
+                                     voice=self.config.kokoro_voice)
+            else:
+                self.tts = MossTts(self.config.tts_url,
+                                   self.config.tts_prompt_wav)
         # PDF fetch is arXiv-spaced too (§6 politeness covers all arXiv
         # access, not just the bibtex cascade).
         self.fetch_pdf = ArxivRateLimited(self.http.fetch_bytes)

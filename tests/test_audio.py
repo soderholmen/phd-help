@@ -3,6 +3,7 @@ the sidecar adapters (server/stt.py, server/tts.py). The kernel is tested
 with scripted VAD verdicts — no clock, no audio model, no GPU."""
 
 import ast
+import asyncio
 import json
 import struct
 from pathlib import Path
@@ -12,7 +13,7 @@ import pytest
 
 from phd_helper.segmenting import FRAME_BYTES, EnergyVad, UtteranceGate
 from phd_helper.server.stt import RemoteVad, SidecarStt
-from phd_helper.server.tts import MossTts
+from phd_helper.server.tts import KokoroTts, MossTts
 
 FRAME_SAMPLES = FRAME_BYTES // 2  # 16 kHz mono PCM16, 30 ms
 
@@ -893,6 +894,166 @@ async def test_moss_tts_sample_rate_defaults_when_the_header_is_absent():
     await s.finish()
     [c async for c in s.chunks()]
     assert tts.sample_rate == 24000
+
+
+# --- KokoroTts -----------------------------------------------------------
+
+def make_kokoro(handler, **kw):
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler),
+                               base_url="http://kokoro.test")
+    return KokoroTts("http://kokoro.test", http=client, **kw)
+
+
+@pytest.mark.anyio
+async def test_kokoro_stream_speaks_each_pushed_sentence_in_order():
+    seen = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append(body)
+        return httpx.Response(200, content=body["input"].encode() * 4)
+
+    tts = make_kokoro(handler)
+    s = tts.stream()
+    await s.push("one.")
+    await s.push("two.")
+    await s.finish()
+    audio = b"".join([c async for c in s.chunks()])
+    assert audio == b"one." * 4 + b"two." * 4   # one continuous PCM buffer
+    assert [b["input"] for b in seen] == ["one.", "two."]
+    assert all(b["response_format"] == "pcm" for b in seen)
+    assert all(b["voice"] == "af_sky" for b in seen)
+
+
+@pytest.mark.anyio
+async def test_kokoro_stream_keeps_order_when_the_second_sentence_finishes_first():
+    # Per-sentence requests race; the wire must still play them in
+    # sentence order — the episode's PCM is one continuous buffer.
+    async def handler(request):
+        body = json.loads(request.content)
+        if body["input"] == "slow one.":
+            await asyncio.sleep(0.05)
+            return httpx.Response(200, content=b"S")
+        return httpx.Response(200, content=b"F")
+
+    tts = make_kokoro(handler)
+    s = tts.stream()
+    await s.push("slow one.")
+    await s.push("fast two.")
+    await s.finish()
+    assert b"".join([c async for c in s.chunks()]) == b"SF"
+
+
+@pytest.mark.anyio
+async def test_kokoro_stream_never_pays_for_silence():
+    calls = []
+    tts = make_kokoro(
+        lambda r: calls.append(r) or httpx.Response(200, content=b""))
+    s = tts.stream()
+    await s.push("   ")                          # whitespace: no request
+    await s.finish()
+    assert [c async for c in s.chunks()] == []
+    assert calls == []
+
+
+@pytest.mark.anyio
+async def test_kokoro_failed_sentence_ends_chunks_and_faults_after_three():
+    # §8: TTS down means screen-only — the iterator ENDS, it never
+    # hangs, and three consecutive failed streams flip faulted().
+    def handler(request):
+        raise httpx.ConnectError("kokoro down", request=request)
+
+    tts = make_kokoro(handler)
+    for _ in range(3):
+        s = tts.stream()
+        await s.push("hello")
+        await s.finish()
+        assert [c async for c in s.chunks()] == []
+    assert tts.faulted()
+
+
+@pytest.mark.anyio
+async def test_kokoro_clean_stream_resets_the_fault_counter():
+    state = {"down": True}
+
+    def handler(request):
+        if state["down"]:
+            raise httpx.ConnectError("kokoro down", request=request)
+        return httpx.Response(200, content=b"AA")
+
+    tts = make_kokoro(handler)
+    for _ in range(2):                           # two strikes stand
+        s = tts.stream()
+        await s.push("x")
+        await s.finish()
+        [c async for c in s.chunks()]
+    state["down"] = False
+    s = tts.stream()                             # one clean stream heals
+    await s.push("x")
+    await s.finish()
+    assert [c async for c in s.chunks()] == [b"AA"]
+    state["down"] = True
+    for _ in range(2):                           # back to two, not five
+        s = tts.stream()
+        await s.push("x")
+        await s.finish()
+        [c async for c in s.chunks()]
+    assert not tts.faulted()
+
+
+@pytest.mark.anyio
+async def test_kokoro_abort_ends_chunks_and_stops_paying_for_unplayed_audio():
+    # A barge abandons the turn: chunks must END (the episode closes),
+    # and a sentence still on the wire is cancelled, not finished.
+    in_flight = {"cancelled": 0}
+
+    async def handler(request):
+        body = json.loads(request.content)
+        if body["input"] == "second.":
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                in_flight["cancelled"] += 1
+                raise
+        return httpx.Response(200, content=b"A")
+
+    tts = make_kokoro(handler)
+    s = tts.stream()
+    await s.push("first.")
+    await s.push("second.")
+    got = []
+    async for chunk in s.chunks():
+        got.append(chunk)
+        await s.abort()                          # barge mid-second-sentence
+    assert got == [b"A"]
+    await asyncio.sleep(0)                       # let the cancel land
+    assert in_flight["cancelled"] == 1
+
+
+@pytest.mark.anyio
+async def test_kokoro_abort_before_any_push_touches_no_network():
+    calls = []
+    tts = make_kokoro(
+        lambda r: calls.append(r) or httpx.Response(200, content=b""))
+    s = tts.stream()
+    await s.abort()
+    assert [c async for c in s.chunks()] == []
+    assert calls == []
+
+
+def test_kokoro_reports_the_rate_it_records_at():
+    # The raw PCM response carries no header: the adapter declares the
+    # rate, and the browser player schedules at it (Kokoro-82M is 24 kHz).
+    assert KokoroTts("http://kokoro.test").sample_rate == 24000
+
+
+@pytest.mark.anyio
+async def test_kokoro_health_reads_the_sidecar_health_door():
+    ok = make_kokoro(
+        lambda r: httpx.Response(200, json={"status": "healthy"}))
+    assert await ok.healthy()
+    down = make_kokoro(lambda r: httpx.Response(503))
+    assert not await down.healthy()
 
 
 # --- sidecar topology pin ---------------------------------------------------

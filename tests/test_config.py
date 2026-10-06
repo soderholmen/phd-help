@@ -47,6 +47,32 @@ def test_audio_sidecar_urls_default_to_loopback():
     assert c.tts_url == "http://127.0.0.1:8083"
 
 
+def test_tts_backend_defaults_to_kokoro(monkeypatch):
+    # The shared kokoro-fastapi instance (:8880, CPU, no VRAM) is the
+    # default voice; MOSS stays selectable (docs/audio-stack.md).
+    monkeypatch.delenv("PHD_TTS", raising=False)
+    assert Config().tts_backend == "kokoro"
+
+
+def test_typo_tts_backend_fails_fast():
+    with pytest.raises(ValueError, match="PHD_TTS"):
+        Config(tts_backend="mosss")
+
+
+def test_kokoro_endpoint_defaults_to_the_shared_instance():
+    c = Config()
+    assert c.kokoro_url == "http://127.0.0.1:8880"
+    assert c.kokoro_voice == "af_sky"
+
+
+def test_kokoro_knobs_read_env_at_construction(monkeypatch):
+    monkeypatch.setenv("PHD_KOKORO_URL", "http://127.0.0.1:9880")
+    monkeypatch.setenv("PHD_KOKORO_VOICE", "af_bella")
+    c = Config()
+    assert (c.kokoro_url, c.kokoro_voice) == ("http://127.0.0.1:9880",
+                                              "af_bella")
+
+
 def test_audio_sidecar_urls_read_env_at_construction(monkeypatch):
     # default_factory, not a class-body os.environ.get: the env must be
     # read when Config() runs, so a test (or a restarted process) can
