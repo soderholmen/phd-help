@@ -138,6 +138,15 @@ button { font: inherit; color: inherit; }
   white-space: nowrap;
 }
 
+/* The background writer is working somewhere out of sight — the slow
+   pulse is liveness, the same backchannel idea the voice carries
+   (glossary: Backchannel), on screen. */
+.chip.writing { animation: chip-pulse 1.6s ease-in-out infinite; }
+@keyframes chip-pulse { 50% { opacity: 0.5; } }
+@media (prefers-reduced-motion: reduce) {
+  .chip.writing { animation: none; }
+}
+
 /* -- header bar: two segments, hairline between, wraps on narrow ---- */
 
 .shell { display: grid; grid-template-rows: auto 1fr; height: 100dvh; }

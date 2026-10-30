@@ -34,6 +34,7 @@ import {
 } from "./api/files";
 import { fetchDocument } from "./api/document";
 import { findRelated, getRelated } from "./api/related";
+import { getWriter, type WriterStatus } from "./api/writer";
 import type {
   CorpusDoc,
   DocSection,
@@ -115,6 +116,10 @@ export default function App() {
   // What the last pass was asked for (issue #29) — the door's stored
   // truth, not a local echo: a pass started elsewhere still shows.
   const [relatedPass, setRelatedPass] = useState<RelatedPass | null>(null);
+  // Background writer (docs/background-writer.md): the chip reads the
+  // same door truth on the tick — a delegation spoken on the phone
+  // still lights the chip on the laptop.
+  const [writer, setWriter] = useState<WriterStatus | null>(null);
   // The read view (SPEC §Section view): Talk/Read is a local view toggle
   // — the transcript keeps living underneath. /document rides the tick
   // only while reading, so the paper stays fresh as the agent writes.
@@ -160,7 +165,7 @@ export default function App() {
   useEffect(() => {
     let stop = false;
     const tick = async () => {
-      const [t, h, d, p, f, g, doc, rel] = await Promise.allSettled([
+      const [t, h, d, p, f, g, doc, rel, w] = await Promise.allSettled([
         fetchTree(),
         fetchHealth(),
         listDocs(),
@@ -169,6 +174,7 @@ export default function App() {
         gitStatus(),
         readingRef.current ? fetchDocument() : Promise.resolve(null),
         getRelated(),
+        getWriter(),
       ]);
       if (stop) return;
       if (t.status === "fulfilled") setTree(t.value);
@@ -190,6 +196,7 @@ export default function App() {
         setRelatedSearching(rel.value.searching);
         setRelatedPass(rel.value.last_pass);
       }
+      if (w.status === "fulfilled") setWriter(w.value);
     };
     const go = () => {
       if (!document.hidden) void tick();
@@ -396,6 +403,7 @@ export default function App() {
         projects={projects}
         active={active}
         gitStatus={git}
+        writerStatus={writer}
         theme={theme}
         onToggleVoice={() => void toggleVoice()}
         onActivate={onActivate}

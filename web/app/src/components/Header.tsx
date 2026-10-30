@@ -15,6 +15,7 @@ import { useRef } from "react";
 import type { CSSProperties } from "react";
 import type { Health } from "../types";
 import type { GitStatus } from "../api/projects";
+import type { WriterStatus } from "../api/writer";
 import type { Theme } from "../useTheme";
 
 interface Props {
@@ -25,6 +26,7 @@ interface Props {
   projects: string[];
   active: string;
   gitStatus: GitStatus | null;
+  writerStatus?: WriterStatus | null;
   theme?: Theme;
   onToggleVoice: () => void;
   onActivate: (name: string) => void;
@@ -64,6 +66,7 @@ export function Header({
   projects,
   active,
   gitStatus,
+  writerStatus,
   theme,
   onToggleVoice,
   onActivate,
@@ -143,6 +146,18 @@ export function Header({
         {health && (
           <span className="chip health" title="component health (§8)">
             llm:{health.vllm} corpus:{health.corpus}
+          </span>
+        )}
+        {/* Background writer (docs/background-writer.md): the second
+            session drafts while the conversation talks — the chip says
+            so, and its title carries the brief. Door truth on the
+            tick, same discipline as health and git. */}
+        {writerStatus?.running && (
+          <span
+            className="chip writing"
+            title={writerStatus.brief || undefined}
+          >
+            ✎ drafting {writerStatus.section.split("/").pop()}
           </span>
         )}
       </span>

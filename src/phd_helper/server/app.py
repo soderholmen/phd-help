@@ -80,6 +80,11 @@ SYSTEM_PROMPT = (
     "6. When the user says to commit or save the paper's progress, call "
     "`git_commit` (message in their words, empty to auto-date). Never "
     "offer to push — pushing is an on-screen gesture.\n"
+    "7. Background drafting: when the user asks to get writing done "
+    "while you keep talking — or asks for a big drafting job — call "
+    "`delegate_write` (section + a complete brief: content, sources, "
+    "length); its patches arrive as ordinary cards. The writer drafts "
+    "in your stead — do not draft that same prose yourself.\n"
     "Keep spoken replies brief. When speaking, pre-normalize math to "
     "words (say 'E equals m c squared', not symbols) — the TTS engine "
     "hallucinates on dense symbol strings.\n")
@@ -380,6 +385,12 @@ class Session:
                         git_run=getattr(self.state, "git_run", None),
                         git_name=self.state.config.git_name,
                         git_email=self.state.config.git_email,
+                        # Background drafting (docs/background-writer.md):
+                        # a delegation belongs to the conversation's
+                        # paper — the turn captured it at start, same
+                        # discipline as the search's on_results.
+                        spawn_writer=lambda sec, brief: spawn_writer(
+                            self.state, project, sec, brief),
                         # Voice decides only inside the window as of
                         # turn start: the user is asked to approve what
                         # they have seen (rubber-stamp guard).
@@ -702,6 +713,12 @@ class AppState:
         # rather than a stored flag — a crashed run can never leave the
         # panel spinning.
         self.related_task: asyncio.Task | None = None
+        # The background writer (docs/background-writer.md): one
+        # drafting session at a time, same running-truth discipline —
+        # writer_info only carries section/brief for the status door,
+        # never whether a pass is live.
+        self.writer_task: asyncio.Task | None = None
+        self.writer_info: dict | None = None
 
     async def _fetch_pdf_or_raise(self, url: str) -> bytes:
         status, body = await self.fetch_pdf(url)
@@ -1184,15 +1201,19 @@ def librarian_context(project, section: str | None, seeds=(),
     return "\n\n".join(parts)
 
 
-async def librarian_notice(state, project, text: str) -> None:
-    """The pass speaks only for its own project: after a project
-    switch, a notice about the old paper's search would be noise in
-    the new conversation (§7). The guard is project identity, not
-    sitting identity — a new sitting on the same paper still hears it,
-    because it is that paper's news."""
+async def project_notice(state, project, text: str) -> None:
+    """A background pass speaks only for its own project: after a
+    project switch, news about the old paper would be noise in the new
+    conversation (§7). The guard is project identity, not sitting
+    identity — a new sitting on the same paper still hears it, because
+    it is that paper's news. Shared by the librarian and the writer."""
     sitting = getattr(state, "sitting", None)
     if sitting is not None and state.project is project:
         await sitting.send({"type": "notice", "text": text})
+
+
+async def librarian_notice(state, project, text: str) -> None:
+    await project_notice(state, project, text)
 
 
 async def run_librarian(state, project, section: str | None,
@@ -1310,6 +1331,174 @@ async def _run_librarian(state, project, section: str | None,
         # shows them whether or not the notice reaches a live socket,
         # and a dead one must not turn a landed pass into the
         # catch-all's "nothing found" (which would then lie)
+
+
+# -- the background writer (docs/background-writer.md) -----------------------
+# A second agent session drafting paper text while the conversation
+# keeps talking. The writer is SILENT: no voice (the talker owns the
+# audio), no chat JSONL (the conversation is the talker's), no direct
+# writes — its only output is the §5 approval cards, the same gate every
+# patch rides. That is what makes it safe to run beside the live turn:
+# the user still approves every word, from either window.
+
+WRITER_TOOL_NAMES = ("section_read", "section_write", "section_create",
+                     "cite_add", "web_search", "corpus_search",
+                     "corpus_doc")
+WRITER_TOOLS = [s for s in TOOL_SCHEMAS
+                if s["function"]["name"] in WRITER_TOOL_NAMES]
+WRITER_OFFERED = {n: OFFERED[n] for n in WRITER_TOOL_NAMES}
+
+WRITER_PROMPT = (
+    "You are phd-helper's background writer. You work alone: the user "
+    "never sees this chat — your only output is the pending patches the "
+    "user approves on screen.\n"
+    "1. Draft the prose the brief asks for, in one pass. The target "
+    "section's current body rides your context; `find` must be an exact "
+    "quote from the file as it is NOW — call `section_read` before a "
+    "patch if you already proposed one into the same section.\n"
+    "2. Match the paper: the skeleton says what it claims and the "
+    "memory which words it uses — contradict neither.\n"
+    "3. A claim that needs a reference: find it with `web_search` / "
+    "`corpus_search` and cite it with `cite_add`. Never invent keys.\n"
+    "4. A new part the brief calls for that has no file yet is a "
+    "`section_create`.\n"
+    "5. You never approve or discard anything, never commit, never "
+    "touch the memory. When done, reply one short line summarizing "
+    "what you proposed — it is a log line, not a message to anyone.")
+
+WRITER_SECTION_CAP = 12000   # chars of the target section sent
+WRITER_BRIEF_CAP = 2000
+WRITER_LOOP_CAP = 6          # tool rounds before the pass calls itself done
+
+
+def writer_context(project, section: str, brief: str) -> str:
+    """What the writer reads before drafting: the brief, the target
+    section as it stands (the find anchor must be quoted from it), the
+    skeleton (claims, placement) and the paper's memory. No conversation
+    — the writer is a hired hand with a note, not a party to the talk."""
+    parts = [f"Brief from the writing session:\n{brief[:WRITER_BRIEF_CAP]}"]
+    try:
+        body = project.read_section(section)
+    except (OSError, KeyError):
+        body = ""  # vanished between delegation and drafting: the
+        # skeleton and the brief still carry the pass; the validators
+        # bounce any patch into a missing file.
+    parts.append(f"Target section ({section}):\n{body[:WRITER_SECTION_CAP]}")
+    parts.append(f"Paper skeleton:\n{project.skeleton()}")
+    memory = project.load_memory()
+    if memory:
+        parts.append(f"Paper memory:\n{memory}")
+    return "\n\n".join(parts)
+
+
+async def writer_card(state, project, vc, result) -> None:
+    """The writer's proposal reaches the conversation as an ordinary §5
+    card — the approval gate is identical whether the patch came from
+    the voice loop or the background session — and it enters the
+    sitting's approval window, so the next utterance can decide it by
+    voice. No live sitting, or a switched one: silence; the diff is
+    disk truth and the next attach's reconcile re-presents it (§7/§8)."""
+    sitting = getattr(state, "sitting", None)
+    if sitting is None or state.project is not project:
+        return
+    # Same lazy .get discipline as run_turn: cite_add/section_create
+    # carry the final find/replace in the result; section_write's are
+    # the call's own args.
+    card = {"type": "diff", "diff_id": result["diff_id"],
+            "section": result["section"],
+            "find": result.get("find") or vc.args.get("find", ""),
+            "replace": (result.get("replace")
+                        or vc.args.get("replace", ""))}
+    if result.get("created"):
+        card["created"] = result["created"]
+    await sitting.send(card)
+    if not any(t["diff_id"] == result["diff_id"]
+               for t in sitting.pending_diffs):
+        sitting.pending_diffs.append({"diff_id": result["diff_id"],
+                                      "section": result["section"]})
+
+
+async def run_writer(state, project, section: str, brief: str) -> None:
+    """One background drafting pass. The librarian's posture for every
+    model reply untrusted: an LLM fault or a crash ends the pass with a
+    notice, never a silent dead tool (the delegate bounce would have
+    told the user a writer exists, and then nothing ever happens).
+    The project is the caller's capture, not state.project: a switch
+    mid-pass must not aim the drafting at the new paper."""
+    try:
+        await _run_writer(state, project, section, brief)
+    except Exception:
+        try:
+            await project_notice(state, project,
+                                 "The writer hit a fault — nothing drafted")
+        except Exception:
+            pass
+
+
+async def _run_writer(state, project, section: str, brief: str) -> None:
+    await project_notice(
+        state, project,
+        f"Writer drafting in {section} — keep talking, its patches "
+        "will show up for approval.")
+    msgs = [{"role": "system", "content": WRITER_PROMPT},
+            {"role": "user", "content": writer_context(
+                project, section, brief)}]
+    proposed = 0
+    for _ in range(WRITER_LOOP_CAP):
+        try:
+            msg, valid_calls, _text = await state.llm.chat(
+                msgs, tools=WRITER_TOOLS, offered=WRITER_OFFERED,
+                validators=make_validators(project, draft=None))
+        except Exception:  # LlmError or worse: the writer keeps no
+            # conversation to poison — notice and stop (§8).
+            await project_notice(state, project,
+                                 "The writer could not reach the model")
+            return
+        if not valid_calls:
+            break  # the closing line: text only, exactly like the talker
+        msgs.append(msg)
+        for vc in valid_calls:
+            result = await execute_async(
+                vc, project, fetch=state.fetch,
+                mailto=state.config.crossref_mailto,
+                openalex_mailto=state.config.openalex_mailto,
+                corpus=state.corpus, store=state.corpus_store,
+                autojoin=lambda ids: autojoin(state, ids),
+                on_results=lambda hits, query: record_related(
+                    project, hits, query=query),
+                # An empty window: the writer never resolves cards —
+                # approval is the user's, spoken to the talker or
+                # clicked. (pending_decide is not even offered; this
+                # is the same belt as the suspenders.)
+                window=frozenset(),
+                git_run=getattr(state, "git_run", None),
+                git_name=state.config.git_name,
+                git_email=state.config.git_email)
+            msgs.append({"role": "tool", "tool_call_id": vc.id,
+                         "content": json.dumps(result)})
+            if result.get("status") == "pending":
+                proposed += 1
+                await writer_card(state, project, vc, result)
+    await project_notice(
+        state, project,
+        f"Writer done: {proposed} patch(es) proposed for {section}"
+        if proposed else
+        f"Writer done: nothing worth proposing came out of {section}")
+
+
+def spawn_writer(state, project, section: str, brief: str) -> bool:
+    """One writer at a time — a second delegation while one drafts
+    bounces to the model, which can tell the user to wait. Running
+    truth is the task, not a stored flag (the librarian guard's
+    lesson): a crashed run can never keep the slot closed."""
+    task = getattr(state, "writer_task", None)
+    if task is not None and not task.done():
+        return False
+    state.writer_info = {"section": section, "brief": brief,
+                         "at": time.strftime("%Y-%m-%d %H:%M")}
+    state.writer_task = spawn(state, run_writer(state, project,
+                                                section, brief))
+    return True
 
 
 def create_app(state: "AppState | None" = None,
@@ -1679,6 +1868,18 @@ def create_app(state: "AppState | None" = None,
             state, run_librarian(state, state.project, section,
                                  seeds, focus))
         return {"searching": True}
+
+    @app.get("/project/writer")
+    async def project_writer():
+        # The chip truth for the background writer
+        # (docs/background-writer.md): running is the task itself, never
+        # a stored flag — a crashed run can leave nothing behind.
+        task = getattr(state, "writer_task", None)
+        running = task is not None and not task.done()
+        info = getattr(state, "writer_info", None) or {}
+        return {"running": running,
+                "section": info.get("section", "") if running else "",
+                "brief": info.get("brief", "") if running else ""}
 
     # -- corpus doors and status (SPEC §6): upload is door 1, the agent
     # fetch/auto-join is door 2; the UI reads status, never searches.

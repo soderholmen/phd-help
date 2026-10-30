@@ -210,6 +210,30 @@ TOOL_SCHEMAS = [
         "parameters": {
             "type": "object", "properties": {},
             "required": [], "additionalProperties": False}}},
+    {"type": "function", "function": {
+        "name": "delegate_write",
+        "description": "Hand substantive drafting to the background "
+                       "writer: a second agent session drafts in the "
+                       "section while you keep the conversation going, "
+                       "and its patches show up as ordinary approval "
+                       "cards. Use when the user wants writing to "
+                       "proceed in the background, or a big drafting "
+                       "job while you keep talking. The writer cannot "
+                       "ask questions — the brief must be complete: "
+                       "content, sources, tone, length.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "section": {"type": "string",
+                            "description": "The existing section to "
+                                           "draft into, e.g. "
+                                           "sections/related.tex"},
+                "brief": {"type": "string",
+                          "description": "What to draft: content, "
+                                         "sources to lean on, tone and "
+                                         "length"}},
+            "required": ["section", "brief"],
+            "additionalProperties": False}}},
 ]
 
 # name -> {required param: json type} — validate_tool_calls checks both
@@ -265,8 +289,23 @@ def make_validators(project: Project, draft: str | None = None) -> dict:
             return (f"no pending diff '{args['diff_id']}' — check the "
                     "pending note")
         return None
+
+    def delegatable(args):
+        # The writer patches an existing section (creates get their own
+        # tool); an empty brief would send it drafting blind.
+        if not args["brief"].strip():
+            return ("the brief must say what to draft — the writer "
+                    "cannot ask questions")
+        try:
+            project.read_section(args["section"])
+        except (OSError, KeyError):
+            return (f"section '{args['section']}' does not exist — "
+                    "delegate into an existing section, or draft a new "
+                    "one yourself with section_create")
+        return None
     return {"section_write": write_ok, "cite_add": find_exists,
-            "section_create": not_exists, "pending_decide": decidable}
+            "section_create": not_exists, "pending_decide": decidable,
+            "delegate_write": delegatable}
 
 
 async def execute_async(call, project: Project, resolve=resolve_bibtex,
@@ -275,9 +314,11 @@ async def execute_async(call, project: Project, resolve=resolve_bibtex,
                         store=None, autojoin=None, on_results=None,
                         window: set[str] | None = None,
                         git_run=None, git_name: str = "phd-helper",
-                        git_email: str = "phd-helper@local") -> dict:
+                        git_email: str = "phd-helper@local",
+                        spawn_writer=None) -> dict:
     """Async dispatch: web_search and cite_add hit the network, the corpus
-    tools hit the index, git_commit spawns git; the rest is sync."""
+    tools hit the index, git_commit spawns git, delegate_write spawns the
+    background writer; the rest is sync."""
     if call.name == "git_commit":
         # The user's hand, #28 posture: a direct write, no §5 card.
         # The subprocess makes this leg async like the network tools.
@@ -335,6 +376,21 @@ async def execute_async(call, project: Project, resolve=resolve_bibtex,
         return await _corpus_search(call, project, corpus, store)
     if call.name == "corpus_doc":
         return await _corpus_doc(call, project, corpus, store)
+    if call.name == "delegate_write":
+        # The task spawn is the app's (it owns the LLM); here the tool
+        # only answers: delegated, or why not. The note must steer the
+        # model away from drafting the same prose itself — one paper,
+        # one draft of a paragraph.
+        if spawn_writer is None:
+            return {"error": "no background writer wired on this server"}
+        if not spawn_writer(call.args["section"], call.args["brief"]):
+            return {"error": "the background writer is already drafting — "
+                             "wait for its cards before delegating again"}
+        return {"status": "delegated", "section": call.args["section"],
+                "note": ("the writer is drafting there in the background; "
+                         "its patches will show up as approval cards. "
+                         "Keep the conversation going — do not draft the "
+                         "same prose yourself")}
     if call.name != "cite_add":
         return execute(call, project, window=window)
     if fetch is None and resolve is resolve_bibtex:

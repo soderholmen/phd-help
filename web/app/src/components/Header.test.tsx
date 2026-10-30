@@ -200,4 +200,23 @@ describe("Header", () => {
     fireEvent.click(screen.getByRole("button", { name: "Push" }));
     expect(onPush).not.toHaveBeenCalled();
   });
+
+  it("the writer chip shows only while a draft runs, brief in the title", () => {
+    const { unmount } = render(<Header {...base} {...noop} />);
+    expect(screen.queryByText(/drafting/)).toBeNull(); // idle: no chip
+    unmount();
+    render(
+      <Header
+        {...base}
+        {...noop}
+        writerStatus={{
+          running: true,
+          section: "sections/related.tex",
+          brief: "cover the retrieval papers",
+        }}
+      />,
+    );
+    const chip = screen.getByText(/drafting related\.tex/);
+    expect(chip.getAttribute("title")).toBe("cover the retrieval papers");
+  });
 });
