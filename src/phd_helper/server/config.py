@@ -74,8 +74,8 @@ def _read_key_store(name):
 @dataclass
 class Config:
     llm_base_url: str = os.environ.get(
-        "PHD_LLM_BASE_URL", "http://10.147.242.50:8888")
-    llm_model: str = os.environ.get("PHD_LLM_MODEL", "qwen3.8-flash-next")
+        "PHD_LLM_BASE_URL", "http://10.0.60.81:8000")
+    llm_model: str = os.environ.get("PHD_LLM_MODEL", "qwen38-nvfp4")
     llm_api_key: str | None = field(
         default_factory=lambda: os.environ.get("PHD_LLM_API_KEY")
         or _read_key_store("vLLM"))
